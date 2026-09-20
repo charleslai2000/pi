@@ -1,9 +1,11 @@
+import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, parse } from "node:path";
 import { fauxAssistantMessage, fauxToolCall, registerFauxProvider } from "@earendil-works/pi-ai/compat";
 import { Type } from "typebox";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { VirtualTerminal } from "../../../tui/test/virtual-terminal.ts";
 import {
 	type CreateAgentSessionRuntimeFactory,
 	createAgentSessionFromServices,
@@ -21,6 +23,7 @@ import type {
 	SessionShutdownEvent,
 	SessionStartEvent,
 } from "../../src/index.ts";
+import { InteractiveMode } from "../../src/modes/interactive/interactive-mode.ts";
 
 type RecordedSessionEvent =
 	| SessionBeforeSwitchEvent
@@ -211,6 +214,200 @@ describe("AgentSessionRuntime characterization", () => {
 			"toolResult",
 			"assistant",
 		]);
+	});
+
+	it("continues a background model and tool operation after foreground switch", async () => {
+		let toolStarted!: () => void;
+		let releaseTool!: () => void;
+		const toolStartedPromise = new Promise<void>((resolve) => {
+			toolStarted = resolve;
+		});
+		const toolReleasePromise = new Promise<void>((resolve) => {
+			releaseTool = resolve;
+		});
+		const { runtime, faux } = await createRuntimeForTest((pi: ExtensionAPI) => {
+			pi.registerTool({
+				name: "background_wait",
+				label: "Background wait",
+				description: "Waits until released",
+				parameters: Type.Object({}),
+				execute: async () => {
+					toolStarted();
+					await toolReleasePromise;
+					return { content: [{ type: "text", text: "tool complete" }], details: {} };
+				},
+			});
+		});
+		const slotA = runtime.sessionPool.getForeground();
+		await runtime.newSession({ keepCurrent: true });
+		const slotB = runtime.sessionPool.getForeground();
+		faux.setResponses([
+			fauxAssistantMessage(fauxToolCall("background_wait", {}), { stopReason: "toolUse" }),
+			fauxAssistantMessage("background answer"),
+		]);
+
+		await runtime.switchForeground(slotA.id);
+		const operation = runtime.session.prompt("run in background");
+		await toolStartedPromise;
+		expect(slotA.activity.busy).toBe(true);
+		await runtime.switchForeground(slotB.id);
+		expect(runtime.session).toBe(slotB.session);
+		expect(slotA.activity.busy).toBe(true);
+		releaseTool();
+		await operation;
+
+		expect(slotA.activity.busy).toBe(false);
+		expect(slotA.activity.unread).toBe(true);
+		expect(
+			slotA.session.messages.some(
+				(message) =>
+					message.role === "assistant" &&
+					message.content.some((part) => part.type === "text" && part.text === "background answer"),
+			),
+		).toBe(true);
+		expect(
+			slotB.session.messages.some(
+				(message) =>
+					message.role === "assistant" &&
+					message.content.some((part) => part.type === "text" && part.text === "background answer"),
+			),
+		).toBe(false);
+		await runtime.switchForeground(slotA.id);
+		expect(slotA.activity.unread).toBe(false);
+	});
+
+	it("integrates background execution, sessions notification, conflict warning, and close", async () => {
+		let toolStarted!: () => void;
+		let releaseTool!: () => void;
+		const toolStartedPromise = new Promise<void>((resolve) => {
+			toolStarted = resolve;
+		});
+		const toolReleasePromise = new Promise<void>((resolve) => {
+			releaseTool = resolve;
+		});
+		const root = join(tmpdir(), `pi-runtime-integration-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+		const design = join(root, "design");
+		mkdirSync(design, { recursive: true });
+		writeFileSync(join(root, "AGENTS.md"), "context-A\n");
+		writeFileSync(join(design, "AGENTS.md"), "context-B\n");
+		execFileSync("git", ["-C", root, "init", "-q"]);
+		const { runtime, faux } = await createRuntimeForTest(
+			(pi: ExtensionAPI) => {
+				pi.registerTool({
+					name: "integration_wait",
+					label: "Integration wait",
+					description: "Waits until released",
+					parameters: Type.Object({}),
+					execute: async () => {
+						toolStarted();
+						await toolReleasePromise;
+						return { content: [{ type: "text", text: "tool result A" }], details: {} };
+					},
+				});
+			},
+			{ cwd: root },
+		);
+		const mode = new InteractiveMode(runtime, { terminal: new VirtualTerminal(120, 40) });
+		const showStatus = vi.spyOn(mode as any, "showStatus");
+		const showWarning = vi.spyOn(mode as any, "showWarning");
+		const slotA = runtime.sessionPool.getForeground();
+		await runtime.newSession({ cwd: design, keepCurrent: true });
+		const slotB = runtime.sessionPool.getForeground();
+		faux.setResponses([
+			fauxAssistantMessage(fauxToolCall("integration_wait", {}), { stopReason: "toolUse" }),
+			fauxAssistantMessage("A background result"),
+			fauxAssistantMessage("B result"),
+			fauxAssistantMessage("B second result"),
+		]);
+		await runtime.switchForeground(slotA.id);
+		const operationA = slotA.session.prompt("run A");
+		await toolStartedPromise;
+		expect(slotA.activity.busy).toBe(true);
+		await runtime.switchForeground(slotB.id);
+		const operationB = slotB.session.prompt("run B");
+		expect(runtime.session).toBe(slotB.session);
+		await operationB;
+		expect(showWarning).toHaveBeenCalledTimes(1);
+		releaseTool();
+		await operationA;
+		expect(slotA.activity.busy).toBe(false);
+		expect(slotA.activity.unread).toBe(true);
+		expect(showStatus).toHaveBeenCalledWith(expect.stringContaining("completed in background"));
+		expect(slotA.session.messages.some((message) => JSON.stringify(message).includes("tool result A"))).toBe(true);
+		expect(slotB.session.messages.some((message) => JSON.stringify(message).includes("tool result A"))).toBe(false);
+		expect(slotA.services.cwd).toBe(root);
+		expect(slotB.services.cwd).toBe(design);
+		await runtime.switchForeground(slotA.id);
+		expect(slotA.activity.unread).toBe(false);
+		expect(runtime.session).toBe(slotA.session);
+		await runtime.closeSession(slotB.id);
+		expect(runtime.sessionPool.get(slotA.id)?.session).toBe(slotA.session);
+		expect(runtime.sessionPool.get(slotB.id)).toBeUndefined();
+		showStatus.mockClear();
+		showWarning.mockClear();
+		void mode;
+		await runtime.dispose();
+	});
+
+	it("explicitly closes a busy background slot without affecting the foreground", async () => {
+		let toolStarted!: () => void;
+		const toolStartedPromise = new Promise<void>((resolve) => {
+			toolStarted = resolve;
+		});
+		const { runtime, faux } = await createRuntimeForTest((pi: ExtensionAPI) => {
+			pi.registerTool({
+				name: "close_wait",
+				label: "Close wait",
+				description: "Waits until aborted",
+				parameters: Type.Object({}),
+				execute: async (_toolCallId, _params, signal) => {
+					toolStarted();
+					await new Promise<void>((resolve) => signal?.addEventListener("abort", () => resolve(), { once: true }));
+					return { content: [{ type: "text", text: "aborted" }], details: {} };
+				},
+			});
+		});
+		const foreground = runtime.sessionPool.getForeground();
+		await runtime.newSession({ keepCurrent: true });
+		const background = runtime.sessionPool.getForeground();
+		faux.setResponses([fauxAssistantMessage(fauxToolCall("close_wait", {}), { stopReason: "toolUse" })]);
+		const operation = background.session.prompt("close me");
+		await toolStartedPromise;
+		expect(background.activity.busy).toBe(true);
+		expect(await runtime.closeSession(background.id)).toBe(true);
+		await operation;
+		expect(runtime.session).toBe(foreground.session);
+		expect(runtime.sessionPool.get(background.id)).toBeUndefined();
+		expect(foreground.activity.busy).toBe(false);
+	});
+
+	it("aborts all busy slots during multi-slot dispose", async () => {
+		let toolStarted!: () => void;
+		const toolStartedPromise = new Promise<void>((resolve) => {
+			toolStarted = resolve;
+		});
+		const { runtime, faux } = await createRuntimeForTest((pi: ExtensionAPI) => {
+			pi.registerTool({
+				name: "quit_wait",
+				label: "Quit wait",
+				description: "Waits until aborted",
+				parameters: Type.Object({}),
+				execute: async (_toolCallId, _params, signal) => {
+					toolStarted();
+					await new Promise<void>((resolve) => signal?.addEventListener("abort", () => resolve(), { once: true }));
+					return { content: [{ type: "text", text: "aborted" }], details: {} };
+				},
+			});
+		});
+		await runtime.newSession({ keepCurrent: true });
+		const busy = runtime.sessionPool.getForeground();
+		faux.setResponses([fauxAssistantMessage(fauxToolCall("quit_wait", {}), { stopReason: "toolUse" })]);
+		const operation = busy.session.prompt("quit me");
+		await toolStartedPromise;
+		const disposePromise = runtime.dispose();
+		await operation;
+		await disposePromise;
+		expect(runtime.sessionPool.list()).toHaveLength(0);
 	});
 
 	it("preserves an existing session when importing a file with the same name", async () => {

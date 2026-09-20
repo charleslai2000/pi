@@ -169,6 +169,7 @@ describe("regression #2860: replaced session callbacks", () => {
 						oldPi = pi;
 						oldSessionFile = ctx.sessionManager.getSessionFile();
 						await ctx.newSession({
+							keepCurrent: false,
 							parentSession: oldSessionFile,
 							withSession: async (replacedCtx) => {
 								events.push(`with:${currentInstance}`);

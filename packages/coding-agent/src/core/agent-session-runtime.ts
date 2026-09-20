@@ -12,7 +12,8 @@ import type {
 import { emitSessionShutdownEvent } from "./extensions/runner.ts";
 import type { CreateAgentSessionResult } from "./sdk.ts";
 import { assertSessionCwdExists } from "./session-cwd.ts";
-import { SessionManager } from "./session-manager.ts";
+import { getDefaultSessionDir, SessionManager } from "./session-manager.ts";
+import { SessionPool, type SessionSlot } from "./session-pool.ts";
 
 /**
  * Result returned by runtime creation.
@@ -73,12 +74,13 @@ function extractUserMessageText(content: string | Array<{ type: string; text?: s
  */
 export class AgentSessionRuntime {
 	private rebindSession?: (session: AgentSession) => Promise<void>;
+	private beforeForegroundSwitch?: () => void;
 	private beforeSessionInvalidate?: () => void;
-	private _session: AgentSession;
-	private _services: AgentSessionServices;
+	private readonly _sessionPool: SessionPool;
 	private readonly createRuntime: CreateAgentSessionRuntimeFactory;
 	private _diagnostics: AgentSessionRuntimeDiagnostic[];
 	private _modelFallbackMessage?: string;
+	private replacementSlot?: SessionSlot;
 
 	constructor(
 		_session: AgentSession,
@@ -86,24 +88,34 @@ export class AgentSessionRuntime {
 		createRuntime: CreateAgentSessionRuntimeFactory,
 		_diagnostics: AgentSessionRuntimeDiagnostic[] = [],
 		_modelFallbackMessage?: string,
+		_sessionPool = new SessionPool(),
 	) {
-		this._session = _session;
-		this._services = _services;
+		this._sessionPool = _sessionPool;
+		const initialSlot = this._sessionPool.adopt(_session, _services);
+		this._sessionPool.setForeground(initialSlot.id);
 		this.createRuntime = createRuntime;
 		this._diagnostics = _diagnostics;
 		this._modelFallbackMessage = _modelFallbackMessage;
 	}
 
+	get sessionPool(): SessionPool {
+		return this._sessionPool;
+	}
+
+	subscribeActivity(listener: Parameters<SessionPool["subscribeActivity"]>[0]): () => void {
+		return this._sessionPool.subscribeActivity(listener);
+	}
+
 	get services(): AgentSessionServices {
-		return this._services;
+		return this._sessionPool.getForeground().services;
 	}
 
 	get session(): AgentSession {
-		return this._session;
+		return this._sessionPool.getForeground().session;
 	}
 
 	get cwd(): string {
-		return this._services.cwd;
+		return this._sessionPool.getForeground().cwd;
 	}
 
 	get diagnostics(): readonly AgentSessionRuntimeDiagnostic[] {
@@ -126,6 +138,10 @@ export class AgentSessionRuntime {
 	 * such as detaching extension-provided TUI components before the old extension
 	 * context becomes stale.
 	 */
+	setBeforeForegroundSwitch(beforeForegroundSwitch?: () => void): void {
+		this.beforeForegroundSwitch = beforeForegroundSwitch;
+	}
+
 	setBeforeSessionInvalidate(beforeSessionInvalidate?: () => void): void {
 		this.beforeSessionInvalidate = beforeSessionInvalidate;
 	}
@@ -164,24 +180,51 @@ export class AgentSessionRuntime {
 		return { cancelled: result?.cancel === true };
 	}
 
-	private async teardownCurrent(reason: SessionShutdownEvent["reason"], targetSessionFile?: string): Promise<void> {
+	private async disposeSlot(
+		slot: SessionSlot,
+		reason: SessionShutdownEvent["reason"],
+		targetSessionFile?: string,
+		remove = true,
+	): Promise<void> {
 		// Settle any active response first so the aborted turn (including tool
 		// results) is persisted to the outgoing session before it is replaced.
-		await this.session.abort();
-		await emitSessionShutdownEvent(this.session.extensionRunner, {
+		this._sessionPool.suppressCompletion(slot.id);
+		await slot.session.abort();
+		await emitSessionShutdownEvent(slot.session.extensionRunner, {
 			type: "session_shutdown",
 			reason,
 			targetSessionFile,
 		});
-		this.beforeSessionInvalidate?.();
-		this.session.dispose();
+		if (slot.id === this._sessionPool.foregroundSlotId) this.beforeSessionInvalidate?.();
+		slot.session.dispose();
+		if (remove) this._sessionPool.removeClosed(slot.id);
 	}
 
-	private apply(result: CreateAgentSessionRuntimeResult): void {
-		this._session = result.session;
-		this._services = result.services;
+	async parkForeground(): Promise<void> {
+		await this._sessionPool.getForeground().session.abort();
+	}
+
+	async switchForeground(slotId: string): Promise<void> {
+		if (this._sessionPool.foregroundSlotId !== slotId) this.beforeForegroundSwitch?.();
+		this._sessionPool.setForeground(slotId);
+		await this.finishSessionReplacement();
+	}
+
+	private async teardownCurrent(reason: SessionShutdownEvent["reason"], targetSessionFile?: string): Promise<void> {
+		this.replacementSlot = this._sessionPool.getForeground();
+		await this.disposeSlot(this.replacementSlot, reason, targetSessionFile, false);
+	}
+
+	private apply(result: CreateAgentSessionRuntimeResult, setForeground = true): SessionSlot {
+		const slot = this._sessionPool.adopt(result.session, result.services);
+		if (setForeground) this._sessionPool.setForeground(slot.id);
+		if (this.replacementSlot) {
+			this._sessionPool.removeClosed(this.replacementSlot.id);
+			this.replacementSlot = undefined;
+		}
 		this._diagnostics = result.diagnostics;
 		this._modelFallbackMessage = result.modelFallbackMessage;
+		return slot;
 	}
 
 	private async finishSessionReplacement(withSession?: (ctx: ReplacedSessionContext) => Promise<void>): Promise<void> {
@@ -191,6 +234,34 @@ export class AgentSessionRuntime {
 		if (withSession) {
 			await withSession(this.session.createReplacedSessionContext());
 		}
+	}
+
+	async prepareSession(
+		sessionPath: string,
+		options?: {
+			cwdOverride?: string;
+			projectTrustContextFactory?: (cwd: string) => ProjectTrustContext;
+		},
+	): Promise<{ result: CreateAgentSessionRuntimeResult; sessionManager: SessionManager }> {
+		const sessionManager = SessionManager.open(sessionPath, undefined, options?.cwdOverride);
+		assertSessionCwdExists(sessionManager, this.cwd);
+		const result = await this.createRuntime({
+			cwd: sessionManager.getCwd(),
+			agentDir: this.services.agentDir,
+			sessionManager,
+			sessionStartEvent: { type: "session_start", reason: "resume", previousSessionFile: this.session.sessionFile },
+			projectTrustContext: options?.projectTrustContextFactory?.(sessionManager.getCwd()),
+		});
+		return { result, sessionManager };
+	}
+
+	async resumePrepared(
+		prepared: { result: CreateAgentSessionRuntimeResult; sessionManager: SessionManager },
+		withSession?: (ctx: ReplacedSessionContext) => Promise<void>,
+	): Promise<void> {
+		const slot = this.apply(prepared.result, false);
+		await this.switchForeground(slot.id);
+		if (withSession) await withSession(this.session.createReplacedSessionContext());
 	}
 
 	async switchSession(
@@ -223,8 +294,28 @@ export class AgentSessionRuntime {
 		return { cancelled: false };
 	}
 
+	async prepareNewSession(options?: {
+		parentSession?: string;
+		cwd?: string;
+	}): Promise<{ result: CreateAgentSessionRuntimeResult; sessionManager: SessionManager }> {
+		const targetCwd = options?.cwd ? resolvePath(options.cwd) : this.cwd;
+		const previousSessionFile = this.session.sessionFile;
+		const sessionManager = SessionManager.create(targetCwd, getDefaultSessionDir(targetCwd, this.services.agentDir));
+		if (options?.parentSession) sessionManager.newSession({ parentSession: options.parentSession });
+		assertSessionCwdExists(sessionManager, this.cwd);
+		const result = await this.createRuntime({
+			cwd: targetCwd,
+			agentDir: this.services.agentDir,
+			sessionManager,
+			sessionStartEvent: { type: "session_start", reason: "new", previousSessionFile },
+		});
+		return { result, sessionManager };
+	}
+
 	async newSession(options?: {
 		parentSession?: string;
+		cwd?: string;
+		keepCurrent?: boolean;
 		setup?: (sessionManager: SessionManager) => Promise<void>;
 		withSession?: (ctx: ReplacedSessionContext) => Promise<void>;
 	}): Promise<{ cancelled: boolean }> {
@@ -233,29 +324,23 @@ export class AgentSessionRuntime {
 			return beforeResult;
 		}
 
-		const previousSessionFile = this.session.sessionFile;
-		const sessionDir = this.session.sessionManager.getSessionDir();
-		const sessionManager = this.session.sessionManager.isPersisted()
-			? SessionManager.create(this.cwd, sessionDir)
-			: SessionManager.inMemory(this.cwd);
-		if (options?.parentSession) {
-			sessionManager.newSession({ parentSession: options.parentSession });
+		const prepared = await this.prepareNewSession(options);
+		if (options?.keepCurrent) {
+			const slot = this.apply(prepared.result, false);
+			await this.switchForeground(slot.id);
+		} else {
+			await this.teardownCurrent("new", prepared.sessionManager.getSessionFile());
+			this.apply(prepared.result);
 		}
-
-		await this.teardownCurrent("new", sessionManager.getSessionFile());
-		this.apply(
-			await this.createRuntime({
-				cwd: this.cwd,
-				agentDir: this.services.agentDir,
-				sessionManager,
-				sessionStartEvent: { type: "session_start", reason: "new", previousSessionFile },
-			}),
-		);
 		if (options?.setup) {
 			await options.setup(this.session.sessionManager);
 			this.session.agent.state.messages = this.session.sessionManager.buildSessionContext().messages;
 		}
-		await this.finishSessionReplacement(options?.withSession);
+		if (options?.keepCurrent) {
+			if (options.withSession) await options.withSession(this.session.createReplacedSessionContext());
+		} else {
+			await this.finishSessionReplacement(options?.withSession);
+		}
 		return { cancelled: false };
 	}
 
@@ -403,13 +488,39 @@ export class AgentSessionRuntime {
 		return { cancelled: false };
 	}
 
+	async abortSession(slotId: string): Promise<boolean> {
+		const slot = this._sessionPool.get(slotId);
+		if (!slot || !slot.activity.busy) return false;
+		this._sessionPool.suppressCompletion(slotId);
+		await slot.session.abort();
+		return true;
+	}
+
+	async closeSession(slotId: string, reason: SessionShutdownEvent["reason"] = "quit"): Promise<boolean> {
+		const slot = this._sessionPool.get(slotId);
+		if (!slot) return false;
+		if (this._sessionPool.list().length === 1) return false;
+		const wasForeground = slot.id === this._sessionPool.foregroundSlotId;
+		if (wasForeground) {
+			const successor = this._sessionPool.list().find((candidate) => candidate.id !== slot.id);
+			if (!successor) return false;
+			await this.disposeSlot(slot, reason);
+			this._sessionPool.setForeground(successor.id);
+			await this.finishSessionReplacement();
+			return true;
+		}
+		await this.disposeSlot(slot, reason);
+		return true;
+	}
+
+	async closeSlot(slotId: string, reason: SessionShutdownEvent["reason"] = "quit"): Promise<void> {
+		await this.closeSession(slotId, reason);
+	}
+
 	async dispose(): Promise<void> {
-		await emitSessionShutdownEvent(this.session.extensionRunner, {
-			type: "session_shutdown",
-			reason: "quit",
-		});
-		this.beforeSessionInvalidate?.();
-		this.session.dispose();
+		for (const slot of this._sessionPool.list()) {
+			await this.disposeSlot(slot, "quit");
+		}
 	}
 }
 

@@ -273,6 +273,7 @@ export {
 	sessionEntryToContextMessages,
 	type ThinkingLevelChangeEntry,
 } from "./core/session-manager.ts";
+export { SessionPool, type SessionSlot } from "./core/session-pool.ts";
 export {
 	type CacheWarmingMode,
 	type CompactionModelOverride,

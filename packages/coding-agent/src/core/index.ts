@@ -81,4 +81,5 @@ export {
 	type TurnStartEvent,
 	type WorkingIndicatorOptions,
 } from "./extensions/index.ts";
+export { SessionPool, type SessionSlot } from "./session-pool.ts";
 export { createSyntheticSourceInfo } from "./source-info.ts";

@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fauxAssistantMessage, registerFauxProvider } from "@earendil-works/pi-ai/compat";
@@ -156,6 +156,68 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 		]);
 	});
 
+	it("prepares cold resume before changing the foreground slot", async () => {
+		const { runtimeHost } = await createRuntimeHost(() => {});
+		const targetDir = join(tmpdir(), `pi-cold-resume-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+		mkdirSync(targetDir, { recursive: true });
+		const targetManager = SessionManager.create(targetDir);
+		targetManager.appendMessage({ role: "user", content: "cold target", timestamp: Date.now() });
+		const targetPath = targetManager.getSessionFile()!;
+		const originalSession = runtimeHost.session;
+		const originalSlot = runtimeHost.sessionPool.getForeground();
+		const prepared = await runtimeHost.prepareSession(targetPath);
+		expect(runtimeHost.sessionPool.list()).toHaveLength(1);
+		expect(runtimeHost.session).toBe(originalSession);
+		await runtimeHost.resumePrepared(prepared);
+		const targetSlot = runtimeHost.sessionPool.getForeground();
+		expect(runtimeHost.session).not.toBe(originalSession);
+		expect(runtimeHost.sessionPool.list()).toHaveLength(2);
+		expect(targetSlot.session.sessionFile).toBe(targetPath);
+		expect(runtimeHost.sessionPool.get(originalSlot.id)?.session).toBe(originalSession);
+		expect(() => originalSession.extensionRunner.createContext().cwd).not.toThrow();
+		rmSync(targetDir, { recursive: true, force: true });
+	});
+
+	it("leaves the foreground slot unchanged when cold resume preparation fails", async () => {
+		const { runtimeHost } = await createRuntimeHost(() => {});
+		const originalSession = runtimeHost.session;
+		const originalSlotId = runtimeHost.sessionPool.foregroundSlotId;
+		const invalidPath = join(tmpdir(), `invalid-pi-session-${Date.now()}.jsonl`);
+		writeFileSync(
+			invalidPath,
+			`${JSON.stringify({
+				type: "session",
+				version: 3,
+				id: "invalid",
+				timestamp: new Date().toISOString(),
+				cwd: join(tmpdir(), "missing-cwd"),
+			})}\n`,
+		);
+		await expect(runtimeHost.prepareSession(invalidPath)).rejects.toThrow();
+		rmSync(invalidPath);
+		expect(runtimeHost.session).toBe(originalSession);
+		expect(runtimeHost.sessionPool.foregroundSlotId).toBe(originalSlotId);
+		expect(runtimeHost.sessionPool.list()).toHaveLength(1);
+		expect(() => originalSession.extensionRunner.createContext().cwd).not.toThrow();
+	});
+
+	it("exposes a foreground-only UI detach seam without invalidating the parked slot", async () => {
+		const { runtimeHost } = await createRuntimeHost(() => {});
+		let detachCount = 0;
+		runtimeHost.setBeforeForegroundSwitch(() => {
+			detachCount++;
+		});
+		const originalSession = runtimeHost.session;
+		await runtimeHost.newSession({ cwd: tmpdir(), keepCurrent: true });
+		const newSlot = runtimeHost.sessionPool.getForeground();
+		const originalSlot = runtimeHost.sessionPool.list().find((slot) => slot.session === originalSession)!;
+		expect(detachCount).toBe(1);
+		await runtimeHost.switchForeground(originalSlot.id);
+		expect(detachCount).toBe(2);
+		expect(runtimeHost.session).toBe(originalSession);
+		expect(() => newSlot.session.extensionRunner.createContext().cwd).not.toThrow();
+	});
+
 	it("honors session_before_switch cancellation", async () => {
 		const events: RecordedSessionEvent[] = [];
 		const { runtimeHost } = await createRuntimeHost((pi) => {
@@ -200,7 +262,7 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 
 		expect(phases).toEqual(["session_shutdown", "beforeSessionInvalidate", "rebindSession"]);
 		expect(() => oldSession.extensionRunner.createContext().cwd).toThrow(
-			"This extension ctx is stale after session replacement or reload. Do not use a captured pi or command ctx after ctx.newSession(), ctx.fork(), ctx.switchSession(), or ctx.reload(). For newSession, fork, and switchSession, move post-replacement work into withSession and use the ctx passed to withSession. For reload, do not use the old ctx after await ctx.reload().",
+			"This extension ctx is stale after session replacement or reload. Do not use a captured pi or command ctx after ctx.newSession(), ctx.fork(), ctx.switchSession(), or ctx.reload().",
 		);
 		runtimeHost.setBeforeSessionInvalidate(undefined);
 		runtimeHost.setRebindSession(undefined);

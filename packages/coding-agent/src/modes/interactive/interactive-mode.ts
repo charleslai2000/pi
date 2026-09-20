@@ -144,6 +144,7 @@ import { ExtensionInputComponent } from "./components/extension-input.ts";
 import { ExtensionSelectorComponent } from "./components/extension-selector.ts";
 import { FooterComponent, formatTokens } from "./components/footer.ts";
 import { formatKeyText, keyDisplayText, keyHint, keyText, rawKeyHint } from "./components/keybinding-hints.ts";
+import { LiveSessionSelector } from "./components/live-session-selector.ts";
 import { LoginDialogComponent } from "./components/login-dialog.ts";
 import { createMermaidMarkdownTransformer } from "./components/mermaid.ts";
 import { ModelSelectorComponent } from "./components/model-selector.ts";
@@ -549,6 +550,26 @@ export class InteractiveMode {
 		const tuiMode = options.tuiMode ?? this.settingsManager.getTuiMode();
 		this.options = { ...options, tuiMode };
 		this.autoTrustOnReloadCwd = options.autoTrustOnReloadCwd;
+		this.runtimeHost.setBeforeForegroundSwitch(() => {
+			this.resetExtensionUI();
+		});
+		this.runtimeHost.subscribeActivity((event) => {
+			if (event.type === "conflict") {
+				const names = event.slots.map((slot) => slot.session.sessionName ?? slot.id).join(" and ");
+				this.showWarning(
+					`${names} are running in the same Git worktree. Concurrent edits may conflict; use separate worktrees for parallel development.`,
+				);
+			} else if (event.type === "completed" && event.slot.id !== this.runtimeHost.sessionPool.foregroundSlotId) {
+				const title =
+					event.slot.session.sessionName ?? event.slot.cwd.split(/[\\/]/).filter(Boolean).pop() ?? event.slot.id;
+				this.showStatus(
+					event.outcome === "error"
+						? `Session "${title}" finished with an error`
+						: `Session "${title}" completed in background`,
+				);
+			}
+			this.ui.requestRender();
+		});
 		this.runtimeHost.setBeforeSessionInvalidate(() => {
 			this.resetExtensionUI();
 		});
@@ -3144,9 +3165,10 @@ export class InteractiveMode {
 				this.editor.setText("");
 				return;
 			}
-			if (text === "/new") {
+			if (text === "/new" || text.startsWith("/new ")) {
+				const cwd = text.slice(4).trim() || undefined;
 				this.editor.setText("");
-				await this.handleClearCommand();
+				await this.handleClearCommand(cwd);
 				return;
 			}
 			if (text === "/compact" || text.startsWith("/compact ")) {
@@ -3172,6 +3194,11 @@ export class InteractiveMode {
 			}
 			if (text === "/dementedelves") {
 				this.handleDementedDelves();
+				this.editor.setText("");
+				return;
+			}
+			if (text === "/sessions") {
+				this.showLiveSessionSelector();
 				this.editor.setText("");
 				return;
 			}
@@ -5474,6 +5501,28 @@ export class InteractiveMode {
 		});
 	}
 
+	private showLiveSessionSelector(): void {
+		this.showSelector((done) => {
+			const selector = new LiveSessionSelector(this.runtimeHost.sessionPool.list(), {
+				foregroundSlotId: this.runtimeHost.sessionPool.foregroundSlotId!,
+				onSwitch: async (slotId) => {
+					if (slotId !== this.runtimeHost.sessionPool.foregroundSlotId) {
+						await this.runtimeHost.switchForeground(slotId);
+					}
+					done();
+				},
+				onClose: async (slotId) => {
+					if (await this.runtimeHost.closeSession(slotId)) done();
+				},
+				onAbort: async (slotId) => {
+					if (await this.runtimeHost.abortSession(slotId)) this.showStatus("Session operation aborted");
+				},
+				onCancel: done,
+			});
+			return { component: selector, focus: selector };
+		});
+	}
+
 	private showSessionSelector(): void {
 		this.showSelector((done) => {
 			const selector = new SessionSelectorComponent(
@@ -5523,10 +5572,19 @@ export class InteractiveMode {
 	): Promise<{ cancelled: boolean }> {
 		this.clearStatusIndicator();
 		try {
-			const result = await this.runtimeHost.switchSession(sessionPath, {
-				withSession: options?.withSession,
+			const existingSlot = this.runtimeHost.sessionPool
+				.list()
+				.find((slot) => slot.session.sessionFile === sessionPath);
+			if (existingSlot) {
+				await this.runtimeHost.switchForeground(existingSlot.id);
+				this.showStatus("Resumed session");
+				return { cancelled: false };
+			}
+			const prepared = await this.runtimeHost.prepareSession(sessionPath, {
 				projectTrustContextFactory: (cwd) => this.createProjectTrustContext(cwd),
 			});
+			await this.runtimeHost.resumePrepared(prepared, options?.withSession);
+			const result = { cancelled: false };
 			if (result.cancelled) {
 				return result;
 			}
@@ -5539,11 +5597,12 @@ export class InteractiveMode {
 					this.showStatus("Resume cancelled");
 					return { cancelled: true };
 				}
-				const result = await this.runtimeHost.switchSession(sessionPath, {
+				const prepared = await this.runtimeHost.prepareSession(sessionPath, {
 					cwdOverride: selectedCwd,
-					withSession: options?.withSession,
 					projectTrustContextFactory: (cwd) => this.createProjectTrustContext(cwd),
 				});
+				await this.runtimeHost.resumePrepared(prepared, options?.withSession);
+				const result = { cancelled: false };
 				if (result.cancelled) {
 					return result;
 				}
@@ -6582,10 +6641,10 @@ export class InteractiveMode {
 		this.ui.requestRender();
 	}
 
-	private async handleClearCommand(): Promise<void> {
+	private async handleClearCommand(cwd?: string): Promise<void> {
 		this.clearStatusIndicator();
 		try {
-			const result = await this.runtimeHost.newSession();
+			const result = await this.runtimeHost.newSession(cwd ? { cwd, keepCurrent: true } : { keepCurrent: true });
 			if (result.cancelled) {
 				return;
 			}
