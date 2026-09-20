@@ -28,6 +28,7 @@ class RuntimeSessionSlot implements SessionSlot {
 	readonly session: AgentSession;
 	readonly services: AgentSessionServices;
 	readonly activity: SessionActivity;
+	readonly gitWorktreeRoot: string | undefined;
 	private readonly unsubscribeActivity: () => void;
 	private suppressNextCompletion = false;
 
