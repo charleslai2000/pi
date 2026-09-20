@@ -124,13 +124,17 @@ export function loadProjectContextFiles(options: {
 	const resolvedAgentDir = resolvePath(options.agentDir);
 
 	const contextFiles: Array<{ path: string; content: string }> = [];
+	// Dedupe by canonical path so symlink aliases load each file exactly once.
 	const seenPaths = new Set<string>();
+	const addContextFile = (file: { path: string; content: string } | null): void => {
+		if (!file) return;
+		const key = canonicalizePath(file.path);
+		if (seenPaths.has(key)) return;
+		seenPaths.add(key);
+		contextFiles.push(file);
+	};
 
-	const globalContext = loadContextFileFromDir(resolvedAgentDir);
-	if (globalContext) {
-		contextFiles.push(globalContext);
-		seenPaths.add(globalContext.path);
-	}
+	addContextFile(loadContextFileFromDir(resolvedAgentDir));
 
 	const ancestorContextFiles: Array<{ path: string; content: string }> = [];
 
@@ -141,9 +145,9 @@ export function loadProjectContextFiles(options: {
 		const contextFile = loadContextFileFromDir(currentDir);
 		const isShadowed =
 			shadowedContextFile !== undefined && canonicalizePath(contextFile?.path ?? "") === shadowedContextFile;
-		if (contextFile && !isShadowed && !seenPaths.has(contextFile.path)) {
+		if (contextFile && !isShadowed && !seenPaths.has(canonicalizePath(contextFile.path))) {
 			ancestorContextFiles.unshift(contextFile);
-			seenPaths.add(contextFile.path);
+			seenPaths.add(canonicalizePath(contextFile.path));
 		}
 
 		const parentDir = dirname(currentDir);

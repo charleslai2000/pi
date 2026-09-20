@@ -100,6 +100,7 @@ import {
 } from "../../core/model-resolver.ts";
 import { CredentialSynchronizationError } from "../../core/model-runtime.ts";
 import { DefaultPackageManager } from "../../core/package-manager.ts";
+import { formatPiRootRelativePath, getPiRoot, PiRootPathError, resolvePiRootRelativePath } from "../../core/pi-root.ts";
 import type { ResourceDiagnostic } from "../../core/resource-loader.ts";
 import { formatMissingSessionCwdPrompt, MissingSessionCwdError } from "../../core/session-cwd.ts";
 import {
@@ -3119,6 +3120,16 @@ export class InteractiveMode {
 				this.editor.setText("");
 				return;
 			}
+			if (text === "/rename" || text.startsWith("/rename ")) {
+				this.handleNameCommand(text);
+				this.editor.setText("");
+				return;
+			}
+			if (text === "/root") {
+				this.handleRootCommand();
+				this.editor.setText("");
+				return;
+			}
 			if (text === "/session") {
 				this.handleSessionCommand();
 				this.editor.setText("");
@@ -3166,9 +3177,9 @@ export class InteractiveMode {
 				return;
 			}
 			if (text === "/new" || text.startsWith("/new ")) {
-				const cwd = text.slice(4).trim() || undefined;
+				const rawArg = text.slice(4).trim() || undefined;
 				this.editor.setText("");
-				await this.handleClearCommand(cwd);
+				await this.handleNewCommand(rawArg);
 				return;
 			}
 			if (text === "/compact" || text.startsWith("/compact ")) {
@@ -4123,9 +4134,13 @@ export class InteractiveMode {
 		await this.ui.terminal.drainInput(1000);
 
 		this.stop();
+
+		// Capture the resume hint before disposing slots. dispose() removes every
+		// slot, and an empty pool has no foreground session, so reading
+		// this.sessionManager afterwards throws "Session pool has no foreground slot".
+		const resumeCommand = formatResumeCommand(this.sessionManager);
 		await this.runtimeHost.dispose();
 
-		const resumeCommand = formatResumeCommand(this.sessionManager);
 		if (resumeCommand) {
 			process.stdout.write(`${chalk.dim("To resume this session:")} ${resumeCommand}\n`);
 		}
@@ -6393,7 +6408,8 @@ export class InteractiveMode {
 	}
 
 	private handleNameCommand(text: string): void {
-		const name = text.replace(/^\/name\s*/, "").trim();
+		// `/rename` is an alias for `/name`; both accept the same argument form.
+		const name = text.replace(/^\/(?:name|rename)\s*/, "").trim();
 		if (!name) {
 			const currentName = this.sessionManager.getSessionName();
 			if (currentName) {
@@ -6413,6 +6429,14 @@ export class InteractiveMode {
 		}
 		this.chatContainer.addChild(new Spacer(1));
 		this.chatContainer.addChild(new Text(theme.fg("dim", `Session name set: ${sessionName ?? name}`), 1, 0));
+		this.ui.requestRender();
+	}
+
+	private handleRootCommand(): void {
+		const piRoot = getPiRoot();
+		const sessionCwd = this.sessionManager.getCwd();
+		this.chatContainer.addChild(new Spacer(1));
+		this.chatContainer.addChild(new Text(`PiRoot: ${piRoot ?? "unresolved"}\nSession cwd: ${sessionCwd}`, 1, 0));
 		this.ui.requestRender();
 	}
 
@@ -6641,6 +6665,42 @@ export class InteractiveMode {
 		this.ui.requestRender();
 	}
 
+	/**
+	 * Handle `/new [path]`.
+	 *
+	 * Without an argument the new session starts in the current foreground
+	 * session cwd. With an argument, the path is interpreted as PiRoot-relative
+	 * (`/new design` means `<PiRoot>/design`), never relative to the current
+	 * session cwd. Absolute paths and `..` escapes are rejected with a
+	 * user-facing message; the resolved target still passes the PiRoot
+	 * containment check in the runtime layer.
+	 */
+	private async handleNewCommand(rawArg?: string): Promise<void> {
+		if (rawArg === undefined) {
+			await this.handleClearCommand();
+			return;
+		}
+
+		const piRoot = getPiRoot();
+		if (piRoot === undefined) {
+			this.showWarning(
+				"Cannot resolve a path without a PiRoot. Use /new to start a session in the current directory.",
+			);
+			return;
+		}
+
+		let target: string;
+		try {
+			target = resolvePiRootRelativePath(rawArg, piRoot);
+		} catch (error: unknown) {
+			const detail = error instanceof PiRootPathError ? error.message : String(error);
+			this.showWarning(`${detail}\n/new expects a path relative to PiRoot (${piRoot}), e.g. /new design`);
+			return;
+		}
+
+		await this.handleClearCommand(target);
+	}
+
 	private async handleClearCommand(cwd?: string): Promise<void> {
 		this.clearStatusIndicator();
 		try {
@@ -6649,7 +6709,17 @@ export class InteractiveMode {
 				return;
 			}
 			this.chatContainer.addChild(new Spacer(1));
-			this.chatContainer.addChild(new Text(`${theme.fg("accent", "✓ New session started")}`, 1, 1));
+			const piRoot = getPiRoot();
+			const targetLabel = cwd && piRoot ? formatPiRootRelativePath(cwd, piRoot) : undefined;
+			this.chatContainer.addChild(
+				new Text(
+					targetLabel !== undefined
+						? `${theme.fg("accent", "✓ New session started")} ${theme.fg("dim", `(${targetLabel})`)}`
+						: `${theme.fg("accent", "✓ New session started")}`,
+					1,
+					1,
+				),
+			);
 			this.ui.requestRender();
 		} catch (error: unknown) {
 			await this.handleFatalRuntimeError("Failed to create session", error);

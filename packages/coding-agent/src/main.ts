@@ -48,6 +48,7 @@ import { applyHttpProxySettings, configureHttpDispatcher } from "./core/http-dis
 import { resolveCliModel, resolveModelScope, type ScopedModel } from "./core/model-resolver.ts";
 import { ModelRuntime } from "./core/model-runtime.ts";
 import { restoreStdout, takeOverStdout } from "./core/output-guard.ts";
+import { resolvePiRoot, setPiRoot } from "./core/pi-root.ts";
 import { type AppMode, resolveProjectTrusted } from "./core/project-trust.ts";
 import type { CreateAgentSessionOptions } from "./core/sdk.ts";
 import {
@@ -648,6 +649,22 @@ export async function main(args: string[], options?: MainOptions) {
 
 	validateForkFlags(parsed);
 	validateSessionIdFlags(parsed);
+
+	// Resolve PiRoot before any session manager is created: it fixes the session
+	// history namespace and the boundary for `/new <path>` for the whole process.
+	// `--root` is authoritative when given; otherwise the nearest ancestor with a
+	// `control/` directory is used. Without a marker, PiRoot stays unset so
+	// SDK/embedded behavior is unchanged.
+	let piRoot: string | undefined;
+	try {
+		piRoot = resolvePiRoot({ explicitRoot: parsed.root, cwd });
+	} catch (error: unknown) {
+		// Always surface PiRoot resolution failures: the CLI must not start
+		// without a known PiRoot when one is required.
+		console.error(chalk.red(`Error: ${error instanceof Error ? error.message : String(error)}`));
+		process.exit(1);
+	}
+	setPiRoot(piRoot);
 
 	// Run migrations (pass cwd for project-local migrations)
 	const { migratedAuthProviders: migratedProviders, deprecationWarnings } = runMigrations(cwd);

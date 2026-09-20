@@ -356,6 +356,26 @@ describe("parseArgs", () => {
 		});
 	});
 
+	describe("--root flag", () => {
+		test("parses --root with a path", () => {
+			const result = parseArgs(["--root", "/workspace"]);
+			expect(result.root).toBe("/workspace");
+		});
+
+		test("produces diagnostic when --root has no value", () => {
+			const result = parseArgs(["--root"]);
+			expect(result.root).toBeUndefined();
+			expect(result.diagnostics).toEqual([{ type: "error", message: "--root requires a path" }]);
+		});
+
+		test("does not treat --root as extension flag when no value follows another flag", () => {
+			const result = parseArgs(["--root", "--offline"]);
+			expect(result.root).toBeUndefined();
+			expect(result.diagnostics).toEqual([{ type: "error", message: "--root requires a path" }]);
+			expect(result.offline).toBe(true);
+		});
+	});
+
 	describe("--offline flag", () => {
 		test("parses --offline flag", () => {
 			const result = parseArgs(["--offline"]);

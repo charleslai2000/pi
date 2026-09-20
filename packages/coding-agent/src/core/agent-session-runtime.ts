@@ -10,6 +10,7 @@ import type {
 	SessionStartEvent,
 } from "./extensions/index.ts";
 import { emitSessionShutdownEvent } from "./extensions/runner.ts";
+import { assertCwdInsidePiRoot, assertSessionCwdInsidePiRoot } from "./pi-root.ts";
 import type { CreateAgentSessionResult } from "./sdk.ts";
 import { assertSessionCwdExists } from "./session-cwd.ts";
 import { getDefaultSessionDir, SessionManager } from "./session-manager.ts";
@@ -244,6 +245,7 @@ export class AgentSessionRuntime {
 		},
 	): Promise<{ result: CreateAgentSessionRuntimeResult; sessionManager: SessionManager }> {
 		const sessionManager = SessionManager.open(sessionPath, undefined, options?.cwdOverride);
+		assertSessionCwdInsidePiRoot(sessionManager.getCwd(), `for resumed session ${sessionPath}`);
 		assertSessionCwdExists(sessionManager, this.cwd);
 		const result = await this.createRuntime({
 			cwd: sessionManager.getCwd(),
@@ -279,6 +281,7 @@ export class AgentSessionRuntime {
 
 		const previousSessionFile = this.session.sessionFile;
 		const sessionManager = SessionManager.open(sessionPath, undefined, options?.cwdOverride);
+		assertSessionCwdInsidePiRoot(sessionManager.getCwd(), `for resumed session ${sessionPath}`);
 		assertSessionCwdExists(sessionManager, this.cwd);
 		await this.teardownCurrent("resume", sessionManager.getSessionFile());
 		this.apply(
@@ -299,6 +302,8 @@ export class AgentSessionRuntime {
 		cwd?: string;
 	}): Promise<{ result: CreateAgentSessionRuntimeResult; sessionManager: SessionManager }> {
 		const targetCwd = options?.cwd ? resolvePath(options.cwd) : this.cwd;
+		// Defense-in-depth: SessionManager.create also enforces this.
+		assertCwdInsidePiRoot(targetCwd);
 		const previousSessionFile = this.session.sessionFile;
 		const sessionManager = SessionManager.create(targetCwd, getDefaultSessionDir(targetCwd, this.services.agentDir));
 		if (options?.parentSession) sessionManager.newSession({ parentSession: options.parentSession });
@@ -319,9 +324,13 @@ export class AgentSessionRuntime {
 		setup?: (sessionManager: SessionManager) => Promise<void>;
 		withSession?: (ctx: ReplacedSessionContext) => Promise<void>;
 	}): Promise<{ cancelled: boolean }> {
-		const beforeResult = await this.emitBeforeSwitch("new");
-		if (beforeResult.cancelled) {
-			return beforeResult;
+		// Warm new sessions stay live in the pool; replacement hooks such as
+		// pi-mux must not intercept this path and swap in a separate process.
+		if (!options?.keepCurrent) {
+			const beforeResult = await this.emitBeforeSwitch("new");
+			if (beforeResult.cancelled) {
+				return beforeResult;
+			}
 		}
 
 		const prepared = await this.prepareNewSession(options);
@@ -474,6 +483,7 @@ export class AgentSessionRuntime {
 		}
 
 		const sessionManager = SessionManager.open(destinationPath, sessionDir, cwdOverride);
+		assertSessionCwdInsidePiRoot(sessionManager.getCwd(), `for imported session ${destinationPath}`);
 		assertSessionCwdExists(sessionManager, this.cwd);
 		await this.teardownCurrent("resume", sessionManager.getSessionFile());
 		this.apply(
