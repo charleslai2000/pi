@@ -110,8 +110,9 @@ describe("PiRoot resolution", () => {
 		expect(resolvePiRoot({ cwd: link })).toBe(root);
 	});
 
-	it("hasPiRootMarker only accepts a control directory", () => {
+	it("hasPiRootMarker only accepts a .pi directory", () => {
 		const root = makePiRoot(base, "project");
+		mkdirSync(join(root, ".pi"), { recursive: true });
 		expect(hasPiRootMarker(root)).toBe(true);
 		writeFileSync(join(base, "filecontrol"), "");
 		expect(hasPiRootMarker(base)).toBe(false);

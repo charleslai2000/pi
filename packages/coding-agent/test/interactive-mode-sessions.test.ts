@@ -31,6 +31,7 @@ describe("InteractiveMode /sessions live selector", () => {
 		let component: LiveSessionSelector | undefined;
 		const done = vi.fn();
 		const runtimeHost = {
+			listActiveSessions: () => [{ slot: slotA }, { slot: slotB }],
 			sessionPool: {
 				foregroundSlotId: slotA.id,
 				list: () => [slotA, slotB],
