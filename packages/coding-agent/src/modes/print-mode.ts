@@ -24,6 +24,8 @@ export interface PrintModeOptions {
 	initialMessage?: string;
 	/** Images to attach to the initial message */
 	initialImages?: ImageContent[];
+	/** Application-owned cleanup after runtime disposal. */
+	onRuntimeDisposed?: () => void;
 }
 
 /**
@@ -45,6 +47,7 @@ export async function runPrintMode(runtimeHost: AgentSessionRuntime, options: Pr
 		unsubscribe?.();
 		unsubscribeBackpressure?.();
 		await runtimeHost.dispose();
+		options.onRuntimeDisposed?.();
 	};
 
 	const registerSignalHandlers = (): void => {

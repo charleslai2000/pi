@@ -48,7 +48,7 @@ import { applyHttpProxySettings, configureHttpDispatcher } from "./core/http-dis
 import { resolveCliModel, resolveModelScope, type ScopedModel } from "./core/model-resolver.ts";
 import { ModelRuntime } from "./core/model-runtime.ts";
 import { restoreStdout, takeOverStdout } from "./core/output-guard.ts";
-import { resolvePiRoot, setPiRoot } from "./core/pi-root.ts";
+import { resolvePiRootInfo, setPiRoot } from "./core/pi-root.ts";
 import { type AppMode, resolveProjectTrusted } from "./core/project-trust.ts";
 import type { CreateAgentSessionOptions } from "./core/sdk.ts";
 import {
@@ -58,6 +58,7 @@ import {
 	type SessionCwdIssue,
 } from "./core/session-cwd.ts";
 import { assertValidSessionId, SessionManager } from "./core/session-manager.ts";
+import { initializeSessionRegistry } from "./core/session-registry.ts";
 import { collectSettingsDiagnostics, deduplicateDiagnostics } from "./core/settings-diagnostics.ts";
 import { SettingsManager } from "./core/settings-manager.ts";
 import { printTimings, resetTimings, time } from "./core/timings.ts";
@@ -656,15 +657,20 @@ export async function main(args: string[], options?: MainOptions) {
 	// `control/` directory is used. Without a marker, PiRoot stays unset so
 	// SDK/embedded behavior is unchanged.
 	let piRoot: string | undefined;
+	let piRootMode: "formal" | "legacy" | undefined;
 	try {
-		piRoot = resolvePiRoot({ explicitRoot: parsed.root, cwd });
+		const resolved = resolvePiRootInfo({ explicitRoot: parsed.root, cwd });
+		piRoot = resolved.root;
+		piRootMode = resolved.mode;
 	} catch (error: unknown) {
 		// Always surface PiRoot resolution failures: the CLI must not start
 		// without a known PiRoot when one is required.
 		console.error(chalk.red(`Error: ${error instanceof Error ? error.message : String(error)}`));
 		process.exit(1);
 	}
-	setPiRoot(piRoot);
+	setPiRoot(piRoot, piRootMode);
+	const sessionRegistry = await initializeSessionRegistry(piRoot!);
+	process.once("exit", () => sessionRegistry.close());
 
 	// Run migrations (pass cwd for project-local migrations)
 	const { migratedAuthProviders: migratedProviders, deprecationWarnings } = runMigrations(cwd);
@@ -694,7 +700,9 @@ export async function main(args: string[], options?: MainOptions) {
 		(parsed.sessionDir ? normalizePath(parsed.sessionDir) : undefined) ??
 		(envSessionDir ? expandTildePath(envSessionDir) : undefined) ??
 		startupSettingsManager.getSessionDir();
-	let sessionManager = await createSessionManager(parsed, cwd, sessionDir, startupSettingsManager);
+	let sessionManager = piRoot
+		? await sessionRegistry.openCanonicalControl(sessionDir)
+		: await createSessionManager(parsed, cwd, sessionDir, startupSettingsManager);
 	const missingSessionCwdIssue = getMissingSessionCwdIssue(sessionManager, cwd);
 	if (missingSessionCwdIssue) {
 		if (appMode === "interactive") {
@@ -865,6 +873,13 @@ export async function main(args: string[], options?: MainOptions) {
 		sessionManager,
 	});
 	time("createAgentSessionRuntime");
+	const initialSlot = runtime.sessionPool.getForeground();
+	sessionRegistry.upsert({
+		id: initialSlot.session.sessionManager.getSessionId(),
+		file: initialSlot.session.sessionFile,
+		cwd: initialSlot.cwd,
+		name: initialSlot.session.sessionManager.getSessionName(),
+	});
 	const { services, session, modelFallbackMessage } = runtime;
 	const { settingsManager, modelRuntime, resourceLoader } = services;
 	setCapabilityOverrides(settingsManager.getTerminalCapabilityOverrides());
@@ -950,13 +965,15 @@ export async function main(args: string[], options?: MainOptions) {
 
 	if (appMode === "rpc") {
 		printTimings();
-		await runRpcMode(runtime);
+		await runRpcMode(runtime, () => sessionRegistry.close());
+		sessionRegistry.close();
 	} else if (appMode === "interactive") {
 		const interactiveMode = new InteractiveMode(runtime, {
 			migratedProviders,
 			startupDiagnostics,
 			modelFallbackMessage,
 			autoTrustOnReloadCwd,
+			onRuntimeDisposed: () => sessionRegistry.close(),
 			initialMessage,
 			initialImages,
 			initialMessages: parsed.messages,
@@ -971,6 +988,7 @@ export async function main(args: string[], options?: MainOptions) {
 			// (Kitty keyboard protocol, device attributes, cell size) before restoring the terminal.
 			await new Promise((resolve) => setTimeout(resolve, 150));
 			interactiveMode.stop();
+			sessionRegistry.close();
 			stopThemeWatcher();
 			printTimings();
 			if (process.stdout.writableLength > 0) {
@@ -991,12 +1009,14 @@ export async function main(args: string[], options?: MainOptions) {
 			messages: parsed.messages,
 			initialMessage,
 			initialImages,
+			onRuntimeDisposed: () => sessionRegistry.close(),
 		});
 		stopThemeWatcher();
 		restoreStdout();
 		if (exitCode !== 0) {
 			process.exitCode = exitCode;
 		}
+		sessionRegistry.close();
 		return;
 	}
 }

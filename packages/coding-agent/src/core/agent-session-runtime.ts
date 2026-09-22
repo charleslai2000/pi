@@ -1,8 +1,35 @@
 import { constants, copyFileSync, existsSync, mkdirSync } from "node:fs";
 import { basename, join, parse, resolve } from "node:path";
+import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { resolvePath } from "../utils/paths.ts";
 import type { AgentSession } from "./agent-session.ts";
 import type { AgentSessionRuntimeDiagnostic, AgentSessionServices } from "./agent-session-services.ts";
+import {
+	type AssociationMutationResult,
+	type AssociationRecord,
+	assignTaskToSession,
+	type CurrentAssignment,
+	readAssociations,
+	reassignTaskToSession,
+	unassignTask,
+} from "./control/associations.ts";
+import { listGoals, listTasks, readGoal, readTask } from "./control/read-model.ts";
+import { createTask, reviseTask } from "./control/task-definitions.ts";
+import {
+	dependencySatisfied,
+	listDerivedFrontier,
+	setTaskDependencies,
+	type TaskIdentity,
+} from "./control/task-dependencies.ts";
+import {
+	type CompleteTaskOptions,
+	cancelTask,
+	completeTask,
+	updateTaskMemory,
+	updateTaskStatus,
+} from "./control/task-mutations.ts";
+import { isTerminalTaskStatus, parseTaskStatus } from "./control/task-status.ts";
+import { type ControlTaskView, getTaskControlView, listFrontierControlViews } from "./control/view.ts";
 import type {
 	ProjectTrustContext,
 	ReplacedSessionContext,
@@ -10,11 +37,12 @@ import type {
 	SessionStartEvent,
 } from "./extensions/index.ts";
 import { emitSessionShutdownEvent } from "./extensions/runner.ts";
-import { assertCwdInsidePiRoot, assertSessionCwdInsidePiRoot } from "./pi-root.ts";
+import { assertCwdInsidePiRoot, assertSessionCwdInsidePiRoot, getPiRootControlCwd } from "./pi-root.ts";
 import type { CreateAgentSessionResult } from "./sdk.ts";
 import { assertSessionCwdExists } from "./session-cwd.ts";
 import { getDefaultSessionDir, SessionManager } from "./session-manager.ts";
 import { SessionPool, type SessionSlot } from "./session-pool.ts";
+import { getSessionRegistry } from "./session-registry.ts";
 
 /**
  * Result returned by runtime creation.
@@ -22,6 +50,41 @@ import { SessionPool, type SessionSlot } from "./session-pool.ts";
  * The caller gets the created session, its cwd-bound services, and all
  * diagnostics collected during setup.
  */
+const CONTROLLER_SESSION_PROTOCOL = [
+	"You are the canonical Controller Session for this PiRoot.",
+	"Controller is a policy LLM: runtime delivers factual Task/Executor notices and atomic tools, but never chooses orchestration policy for you.",
+	"When a Task-change notice arrives, inspect facts with inspect_task and, when useful, inspect_frontier before deciding.",
+	"Use notice_executor to continue or correct an existing Executor only when the facts justify it.",
+	"Use switch_executor_model only when an explicit model change is justified; it preserves the same Executor Session and is unavailable while that Session is running.",
+	"Context budget exhausted is only an observation, not proof that capability is insufficient. First inspect the Task, Executor state, active model, context snapshot, and any waiting-user or external-condition reason.",
+	"If the Task has clear remaining work and a larger-context or stronger available model has a concrete expected benefit, you may explicitly switch the settled Executor in the same Session and then use notice_executor to continue it.",
+	"Do not switch models merely because an exhausted notice arrived. Do not switch when the Executor is BLOCKED waiting for a user or external condition.",
+	"Do not escalate indefinitely: if no better justified model is available, the Task has no clear next action, or another switch would be speculative, stop and wait naturally. Runtime never performs this decision for you.",
+	"A completed Task remains DONE. Review is conditional: do not review every Task by default; create an ordinary review Task only when the Task type, risk, result, evidence, or model makes a concrete quality benefit worthwhile.",
+	"Create a review Task with create_task, include the reviewed Task identity and result, review objective, acceptance criteria, and evidence or risk checks, then use set_task_dependencies so it depends on the completed Task. Dispatch it with the ordinary frontier and dispatch_task tools.",
+	"A reviewer is an ordinary Executor with only task_gate, task_memory, and task_result. A passing review completes the review Task and never modifies or reopens the original Task.",
+	"If review findings require work, record findings in the review Task, complete it, and create an ordinary remediation Task with create_task and explicit DAG prerequisites. Do not reopen the original Task.",
+	"Avoid duplicate review Tasks for the same completed result: inspect existing Tasks and their durable memory before creating one. Do not create a review/remediation loop without a new concrete result or finding.",
+	"There is no ReviewExecution or reviewer-specific runtime; review and remediation are normal Tasks and must settle when no clear next action exists.",
+	"A rejected or terminated Task may be dispatched again with dispatch_task when its current state and frontier eligibility justify that decision.",
+	"A newly eligible frontier Task may be dispatched with dispatch_task; multiple frontier Tasks may be dispatched separately to separate Executor Sessions.",
+	"A BLOCKED Task may be waiting for a user or external condition. Do not mechanically send continue notices, and do not repeatedly prompt a non-terminal Task without a concrete reason.",
+	"If there is no clear next action, naturally settle this Controller Session. Do not implement a scheduler, polling loop, hardcoded dispatch loop, or hidden orchestration state.",
+	"Controller close_task is an explicit lifecycle mutation and does not require a self-notification; Executor-originated reject, BLOCKED, DONE, and DEFERRED notices remain factual inputs.",
+].join("\n");
+
+export interface ExecutorContextSnapshot {
+	readonly currentContextUsage: number | null;
+	readonly effectiveContextLimit: number | null;
+	readonly remainingHeadroom: number | null;
+	readonly contextPercent: number | null;
+	readonly budgetState: "available" | "compacting" | "unknown" | "exhausted";
+	readonly compaction: {
+		readonly active: boolean;
+		readonly usageKnown: boolean;
+	};
+}
+
 export interface CreateAgentSessionRuntimeResult extends CreateAgentSessionResult {
 	services: AgentSessionServices;
 	diagnostics: AgentSessionRuntimeDiagnostic[];
@@ -45,6 +108,13 @@ export type CreateAgentSessionRuntimeFactory = (options: {
 /**
  * Thrown when /import references a JSONL file path that does not exist.
  */
+export class ControlSessionAlreadyExistsError extends Error {
+	constructor() {
+		super("The control session already exists. Switch to it with /sessions.");
+		this.name = "ControlSessionAlreadyExistsError";
+	}
+}
+
 export class SessionImportFileNotFoundError extends Error {
 	readonly filePath: string;
 
@@ -82,6 +152,9 @@ export class AgentSessionRuntime {
 	private _diagnostics: AgentSessionRuntimeDiagnostic[];
 	private _modelFallbackMessage?: string;
 	private replacementSlot?: SessionSlot;
+	private readonly taskSessionBindings = new Map<string, () => void>();
+	private readonly taskSessionAdmission = new Map<string, { accepted: boolean; resulted: boolean }>();
+	private controllerNoticeKeys = new Set<string>();
 
 	constructor(
 		_session: AgentSession,
@@ -97,6 +170,10 @@ export class AgentSessionRuntime {
 		this.createRuntime = createRuntime;
 		this._diagnostics = _diagnostics;
 		this._modelFallbackMessage = _modelFallbackMessage;
+		if (getSessionRegistry()?.canonicalControlSessionId() === _session.sessionManager.getSessionId()) {
+			this.installControllerTools(_session);
+			_session.setTaskSessionProtocol(CONTROLLER_SESSION_PROTOCOL);
+		}
 	}
 
 	get sessionPool(): SessionPool {
@@ -125,6 +202,699 @@ export class AgentSessionRuntime {
 
 	get modelFallbackMessage(): string | undefined {
 		return this._modelFallbackMessage;
+	}
+
+	private associationRoot(): string {
+		const registry = getSessionRegistry();
+		if (!registry) throw new Error("Session registry is not initialized");
+		return registry.getRoot();
+	}
+
+	getExecutorContextSnapshot(sessionId: string): ExecutorContextSnapshot | undefined {
+		const slot = this._sessionPool.findBySessionId(sessionId);
+		if (!slot) return undefined;
+		if (typeof slot.session.getContextUsage !== "function") return undefined;
+		const usage = slot.session.getContextUsage();
+		const compacting = slot.session.isCompacting === true;
+		const budgetState = compacting
+			? "compacting"
+			: usage?.tokens === null || usage === undefined
+				? "unknown"
+				: usage.tokens >= usage.contextWindow
+					? "exhausted"
+					: "available";
+		return {
+			currentContextUsage: usage?.tokens ?? null,
+			effectiveContextLimit: usage?.contextWindow ?? null,
+			remainingHeadroom:
+				usage?.tokens === null || usage === undefined ? null : Math.max(0, usage.contextWindow - usage.tokens),
+			contextPercent: usage?.percent ?? null,
+			budgetState,
+			compaction: {
+				active: compacting,
+				usageKnown: usage?.tokens !== null && usage !== undefined,
+			},
+		};
+	}
+
+	private async notifyController(factKey: string, message: string): Promise<void> {
+		if (!this.controllerNoticeKeys) this.controllerNoticeKeys = new Set<string>();
+		const noticeKeys = this.controllerNoticeKeys;
+		if (noticeKeys.has(factKey)) return;
+		noticeKeys.add(factKey);
+		const controllerId = getSessionRegistry()?.canonicalControlSessionId();
+		if (!controllerId) return;
+		const controller = this._sessionPool.findBySessionId(controllerId);
+		if (!controller) return;
+		if (controller.session.isStreaming) {
+			await controller.session.steer(message, undefined, { source: "extension" });
+		} else {
+			await controller.session.prompt(message, { expandPromptTemplates: false, source: "extension" });
+		}
+	}
+
+	private async notifyTaskChange(
+		goalId: string,
+		taskId: string,
+		status: string,
+		executor: string,
+		reason: string,
+	): Promise<void> {
+		await this.notifyController(
+			`${goalId}/${taskId}:${status}:${executor}:${reason}`,
+			`Task ${goalId}/${taskId} changed:\nstatus=${status}\nexecutor=${executor}\nreason=${reason}`,
+		);
+	}
+
+	private associationRecord(): AssociationRecord {
+		return readAssociations(this.associationRoot());
+	}
+
+	listCurrentAssignments(): Array<
+		CurrentAssignment & { sessionName?: string; cwd?: string; runtimeState: "active" | "inactive" }
+	> {
+		const registry = getSessionRegistry();
+		const record = this.associationRecord();
+		return record.current.map((assignment) => {
+			const row = registry?.rows().find((candidate) => candidate.session_id === assignment.sessionId);
+			return {
+				...assignment,
+				sessionName: row?.name ?? undefined,
+				cwd: row?.cwd,
+				runtimeState: row?.runtime_state ?? "inactive",
+			};
+		});
+	}
+
+	getTaskAssignment(goalId: string, taskId: string) {
+		readGoal(this.associationRoot(), goalId);
+		readTask(this.associationRoot(), goalId, taskId);
+		return this.listCurrentAssignments().find(
+			(assignment) => assignment.goalId === goalId && assignment.taskId === taskId,
+		);
+	}
+
+	getSessionAssignment(sessionId: string) {
+		return this.listCurrentAssignments().find((assignment) => assignment.sessionId === sessionId);
+	}
+
+	private isCurrentTaskBinding(
+		goalId: string,
+		taskId: string,
+		sessionId: string,
+		admission: { accepted: boolean; resulted: boolean },
+	): boolean {
+		if (!admission.accepted || admission.resulted || this.taskSessionAdmission.get(sessionId) !== admission)
+			return false;
+		return this.getTaskAssignment(goalId, taskId)?.sessionId === sessionId;
+	}
+
+	assignTask(goalId: string, taskId: string, sessionId: string): Promise<AssociationMutationResult> {
+		return assignTaskToSession(this.associationRoot(), goalId, taskId, sessionId);
+	}
+
+	async unassignTask(goalId: string, taskId: string): Promise<AssociationMutationResult> {
+		const current = this.getTaskAssignment(goalId, taskId);
+		const result = await unassignTask(this.associationRoot(), goalId, taskId);
+		if (result.changed && current) this.taskSessionBindings.get(current.sessionId)?.();
+		if (result.changed && current) this.taskSessionBindings.delete(current.sessionId);
+		return result;
+	}
+
+	async reassignTask(goalId: string, taskId: string, sessionId: string): Promise<AssociationMutationResult> {
+		const current = this.getTaskAssignment(goalId, taskId);
+		const result = await reassignTaskToSession(this.associationRoot(), goalId, taskId, sessionId);
+		if (result.changed && current && current.sessionId !== sessionId) {
+			this.taskSessionBindings.get(current.sessionId)?.();
+			this.taskSessionBindings.delete(current.sessionId);
+		}
+		return result;
+	}
+
+	getTaskControlView(goalId: string, taskId: string): ControlTaskView {
+		return getTaskControlView(this.associationRoot(), goalId, taskId);
+	}
+
+	listFrontierControlViews(): ControlTaskView[] {
+		return listFrontierControlViews(this.associationRoot());
+	}
+
+	async completeTask(goalId: string, taskId: string, options?: CompleteTaskOptions) {
+		const result = await completeTask(this.associationRoot(), goalId, taskId, options);
+		if (result.changed) {
+			const assignment = this.getTaskAssignment(goalId, taskId);
+			if (assignment) {
+				this.taskSessionBindings.get(assignment.sessionId)?.();
+				await unassignTask(this.associationRoot(), goalId, taskId);
+			}
+		}
+		return result;
+	}
+
+	async cancelTask(goalId: string, taskId: string) {
+		const result = await cancelTask(this.associationRoot(), goalId, taskId);
+		if (result.changed) {
+			const assignment = this.getTaskAssignment(goalId, taskId);
+			if (assignment) {
+				this.taskSessionBindings.get(assignment.sessionId)?.();
+				await unassignTask(this.associationRoot(), goalId, taskId);
+			}
+		}
+		return result;
+	}
+
+	private controllerTool(
+		session: AgentSession,
+		name: string,
+		description: string,
+		parameters: AgentTool["parameters"],
+		execute: AgentTool["execute"],
+	): () => void {
+		return session.installTemporaryTool({ name, label: name, description, parameters, execute });
+	}
+
+	private installControllerTools(_session: AgentSession): void {
+		const text = (value: string) => ({ content: [{ type: "text" as const, text: value }], details: undefined });
+		this.controllerTool(
+			_session,
+			"create_task",
+			"Create a READY Task definition without dispatching it.",
+			{
+				type: "object",
+				properties: {
+					goalId: { type: "string" },
+					taskId: { type: "string" },
+					slug: { type: "string" },
+					objective: { type: "string" },
+					constraints: { type: "string" },
+					inputs: { type: "string" },
+					completion: { type: "string" },
+				},
+				required: ["goalId", "taskId", "slug", "objective", "completion"],
+				additionalProperties: false,
+			} as AgentTool["parameters"],
+			async (_id, raw) => {
+				const p = raw as Record<string, unknown>;
+				const task = createTask(this.associationRoot(), String(p.goalId), String(p.taskId), String(p.slug), {
+					objective: String(p.objective),
+					constraints: p.constraints as string | undefined,
+					inputs: p.inputs as string | undefined,
+					completion: String(p.completion),
+				});
+				return text(`Created ${task.goalId}/${task.taskId}`);
+			},
+		);
+		this.controllerTool(
+			_session,
+			"revise_task",
+			"Revise non-terminal Task definition fields without changing runtime state.",
+			{
+				type: "object",
+				properties: {
+					goalId: { type: "string" },
+					taskId: { type: "string" },
+					objective: { type: "string" },
+					constraints: { type: "string" },
+					inputs: { type: "string" },
+					completion: { type: "string" },
+				},
+				required: ["goalId", "taskId"],
+				additionalProperties: false,
+			} as AgentTool["parameters"],
+			async (_id, raw) => {
+				const p = raw as Record<string, unknown>;
+				const task = await reviseTask(this.associationRoot(), String(p.goalId), String(p.taskId), {
+					objective: p.objective as string | undefined,
+					constraints: p.constraints as string | undefined,
+					inputs: p.inputs as string | undefined,
+					completion: p.completion as string | undefined,
+				});
+				return text(`Revised ${task.goalId}/${task.taskId}`);
+			},
+		);
+		this.controllerTool(
+			_session,
+			"inspect_task",
+			"Inspect Task definition, durable memory, assignment, and Executor runtime state.",
+			{
+				type: "object",
+				properties: { goalId: { type: "string" }, taskId: { type: "string" } },
+				required: ["goalId", "taskId"],
+				additionalProperties: false,
+			} as AgentTool["parameters"],
+			async (_id, raw) => {
+				const p = raw as Record<string, unknown>;
+				const task = readTask(this.associationRoot(), String(p.goalId), String(p.taskId));
+				const assignment = this.getTaskAssignment(task.goalId, task.taskId);
+				const executor = assignment ? this._sessionPool.findBySessionId(assignment.sessionId) : undefined;
+				return {
+					content: [
+						{
+							type: "text" as const,
+							text: JSON.stringify({
+								task,
+								assignment,
+								executor: executor
+									? {
+											sessionId: assignment?.sessionId,
+											busy: executor.activity.busy,
+											runtimeState: "active",
+											context: this.getExecutorContextSnapshot(assignment!.sessionId),
+										}
+									: undefined,
+							}),
+						},
+					],
+					details: undefined,
+				};
+			},
+		);
+		this.controllerTool(
+			_session,
+			"set_task_dependencies",
+			"Replace prerequisites for a non-terminal Task.",
+			{
+				type: "object",
+				properties: {
+					goalId: { type: "string" },
+					taskId: { type: "string" },
+					prerequisites: {
+						type: "array",
+						items: {
+							type: "object",
+							properties: { goalId: { type: "string" }, taskId: { type: "string" } },
+							required: ["goalId", "taskId"],
+							additionalProperties: false,
+						},
+					},
+				},
+				required: ["goalId", "taskId", "prerequisites"],
+				additionalProperties: false,
+			} as AgentTool["parameters"],
+			async (_id, raw) => {
+				const p = raw as { goalId: string; taskId: string; prerequisites: TaskIdentity[] };
+				const task = await setTaskDependencies(
+					this.associationRoot(),
+					p.goalId,
+					p.taskId,
+					p.prerequisites,
+					(goalId, taskId) => Boolean(this.getTaskAssignment(goalId, taskId)),
+				);
+				return text(`Updated prerequisites for ${task.goalId}/${task.taskId}`);
+			},
+		);
+		this.controllerTool(
+			_session,
+			"inspect_frontier",
+			"Compute the currently dispatchable derived Task frontier.",
+			{ type: "object", properties: {}, additionalProperties: false } as AgentTool["parameters"],
+			async () => {
+				const root = this.associationRoot();
+				const assignments = readAssociations(root);
+				const tasks = listGoals(root).flatMap((goal) => listTasks(root, goal.goalId));
+				const frontier = listDerivedFrontier(root, tasks, (task) =>
+					assignments.current.some(
+						(assignment) => assignment.goalId === task.goalId && assignment.taskId === task.taskId,
+					),
+				);
+				return {
+					content: [
+						{
+							type: "text" as const,
+							text: JSON.stringify(
+								frontier.map((task) => ({
+									goalId: task.goalId,
+									taskId: task.taskId,
+									status: task.status,
+									objective: task.objective,
+									prerequisites: task.prerequisites,
+									dependenciesSatisfied: dependencySatisfied(root, task),
+								})),
+							),
+						},
+					],
+					details: undefined,
+				};
+			},
+		);
+		this.controllerTool(
+			_session,
+			"dispatch_task",
+			"Assign a READY or DEFERRED Task to an Executor Session and start admission.",
+			{
+				type: "object",
+				properties: { goalId: { type: "string" }, taskId: { type: "string" }, sessionId: { type: "string" } },
+				required: ["goalId", "taskId"],
+				additionalProperties: false,
+			} as AgentTool["parameters"],
+			async (_id, raw) => {
+				const p = raw as Record<string, unknown>;
+				const task = readTask(this.associationRoot(), String(p.goalId), String(p.taskId));
+				if (task.status !== "READY" && task.status !== "DEFERRED")
+					throw new Error(`Task is not dispatchable: ${task.goalId}/${task.taskId}`);
+				if (!dependencySatisfied(this.associationRoot(), task))
+					throw new Error(`Task prerequisites are not satisfied: ${task.goalId}/${task.taskId}`);
+				if (this.getTaskAssignment(task.goalId, task.taskId))
+					throw new Error(`Task already has a valid assignment: ${task.goalId}/${task.taskId}`);
+				let target = typeof p.sessionId === "string" ? this._sessionPool.findBySessionId(p.sessionId) : undefined;
+				if (p.sessionId !== undefined && !target)
+					throw new Error(`Executor Session is not live: ${String(p.sessionId)}`);
+				if (!target) {
+					const manager = SessionManager.create(this.cwd, getDefaultSessionDir(this.cwd, this.services.agentDir));
+					if (manager.getSessionFile() && !existsSync(manager.getSessionFile()!)) manager.persistSessionHeader();
+					const result = await this.createRuntime({
+						cwd: this.cwd,
+						agentDir: this.services.agentDir,
+						sessionManager: manager,
+					});
+					target = this._sessionPool.adopt(result.session, result.services);
+				}
+				await assignTaskToSession(
+					this.associationRoot(),
+					task.goalId,
+					task.taskId,
+					target.session.sessionManager.getSessionId(),
+				);
+				await this.startAssignedTask(task.goalId, task.taskId);
+				return text(`Dispatched ${task.goalId}/${task.taskId} to ${target.session.sessionManager.getSessionId()}`);
+			},
+		);
+		this.controllerTool(
+			_session,
+			"switch_executor_model",
+			"Switch a settled Executor Session to another authenticated model without changing its Session or Task assignment.",
+			{
+				type: "object",
+				properties: {
+					executor_id: { type: "string" },
+					model: { type: "string" },
+					effort: { type: "string" },
+				},
+				required: ["executor_id", "model"],
+				additionalProperties: false,
+			} as AgentTool["parameters"],
+			async (_id, raw) => {
+				const params = raw as { executor_id?: unknown; model?: unknown; effort?: unknown };
+				if (typeof params.executor_id !== "string" || typeof params.model !== "string")
+					throw new Error("executor_id and model are required");
+				const target = this._sessionPool.findBySessionId(params.executor_id);
+				if (!target) throw new Error(`Executor Session is not live: ${params.executor_id}`);
+				if (target.session.isStreaming) throw new Error("Cannot switch a running Executor Session");
+				const separator = params.model.indexOf("/");
+				if (separator <= 0 || separator === params.model.length - 1)
+					throw new Error(`Invalid model identifier: ${params.model}`);
+				const provider = params.model.slice(0, separator);
+				const modelId = params.model.slice(separator + 1);
+				const model = target.services.modelRuntime.getModel(provider, modelId);
+				if (!model) throw new Error(`Model is not available: ${params.model}`);
+				await target.session.setModel(model, { persist: false });
+				if (params.effort !== undefined) {
+					if (typeof params.effort !== "string") throw new Error("Invalid effort");
+					target.session.setThinkingLevel(params.effort as Parameters<AgentSession["setThinkingLevel"]>[0], {
+						persist: false,
+					});
+				}
+				return text(`Switched ${params.executor_id} to ${params.model}`);
+			},
+		);
+		this.controllerTool(
+			_session,
+			"notice_executor",
+			"Send a native Session message to an Executor without changing Task lifecycle.",
+			{
+				type: "object",
+				properties: { sessionId: { type: "string" }, message: { type: "string" } },
+				required: ["sessionId", "message"],
+				additionalProperties: false,
+			} as AgentTool["parameters"],
+			async (_id, raw) => {
+				const p = raw as Record<string, unknown>;
+				const target = this._sessionPool.findBySessionId(String(p.sessionId));
+				if (!target) throw new Error(`Executor Session is not live: ${String(p.sessionId)}`);
+				await target.session.prompt(String(p.message), { expandPromptTemplates: false, source: "extension" });
+				return text(`Noticed ${String(p.sessionId)}`);
+			},
+		);
+		this.controllerTool(
+			_session,
+			"close_task",
+			"Explicitly complete or cancel a Task lifecycle.",
+			{
+				type: "object",
+				properties: {
+					goalId: { type: "string" },
+					taskId: { type: "string" },
+					outcome: { type: "string", enum: ["completed", "cancelled"] },
+					result: { type: "string" },
+					remaining: { type: "string" },
+				},
+				required: ["goalId", "taskId", "outcome"],
+				additionalProperties: false,
+			} as AgentTool["parameters"],
+			async (_id, raw) => {
+				const p = raw as Record<string, unknown>;
+				if (p.outcome === "completed")
+					await this.completeTask(String(p.goalId), String(p.taskId), {
+						result: p.result as string | undefined,
+						remaining: p.remaining as string | undefined,
+					});
+				else if (p.outcome === "cancelled") await this.cancelTask(String(p.goalId), String(p.taskId));
+				else throw new Error("Invalid close_task outcome");
+				return text(`Closed ${String(p.goalId)}/${String(p.taskId)} as ${String(p.outcome)}`);
+			},
+		);
+		_session.setActiveToolsByName([
+			..._session.getActiveToolNames(),
+			"create_task",
+			"revise_task",
+			"inspect_task",
+			"set_task_dependencies",
+			"inspect_frontier",
+			"dispatch_task",
+			"switch_executor_model",
+			"notice_executor",
+			"close_task",
+		]);
+	}
+
+	/** Start Task work in its assigned long-lived Pi Session. */
+	async startAssignedTask(goalId: string, taskId: string, options?: { admitted?: boolean }): Promise<void> {
+		const piRoot = this.associationRoot();
+		const task = readTask(piRoot, goalId, taskId);
+		const status = parseTaskStatus(task.status);
+		if (status === undefined) throw new Error(`Task has invalid Status: ${goalId}/${taskId}`);
+		if (isTerminalTaskStatus(status)) throw new Error(`Task is terminal: ${goalId}/${taskId}`);
+		const assignment = this.getTaskAssignment(goalId, taskId);
+		if (!assignment) throw new Error(`Task is not assigned: ${goalId}/${taskId}`);
+		const slot = this._sessionPool.findBySessionId(assignment.sessionId);
+		if (!slot) throw new Error(`Assigned Session is not live: ${assignment.sessionId}`);
+		this.taskSessionBindings.get(assignment.sessionId)?.();
+		const admission = { accepted: options?.admitted === true, resulted: false };
+		const previousTools = slot.session.getActiveToolNames();
+		let activateTaskTools = (): void => {};
+		this.taskSessionAdmission.set(assignment.sessionId, admission);
+		const removeLifecycleListener = slot.session.subscribe((event) => {
+			if (
+				event.type === "agent_start" &&
+				this.isCurrentTaskBinding(goalId, taskId, assignment.sessionId, admission)
+			) {
+				const current = readTask(piRoot, goalId, taskId);
+				if (parseTaskStatus(current.status) === "BLOCKED")
+					void updateTaskStatus(piRoot, goalId, taskId, { status: "ACTIVE" });
+			}
+			if (
+				event.type === "agent_settled" &&
+				this.isCurrentTaskBinding(goalId, taskId, assignment.sessionId, admission)
+			) {
+				const context = this.getExecutorContextSnapshot(assignment.sessionId);
+				if (context?.budgetState === "exhausted")
+					void this.notifyTaskChange(
+						goalId,
+						taskId,
+						"ACTIVE",
+						assignment.sessionId,
+						"executor context budget exhausted",
+					);
+				const current = readTask(piRoot, goalId, taskId);
+				if (parseTaskStatus(current.status) === "ACTIVE")
+					void updateTaskStatus(piRoot, goalId, taskId, { status: "BLOCKED" }).then(() =>
+						this.notifyTaskChange(
+							goalId,
+							taskId,
+							"BLOCKED",
+							assignment.sessionId,
+							"executor settled without task_result",
+						),
+					);
+			}
+		});
+		const taskGate = slot.session.installTemporaryTool({
+			name: "task_gate",
+			label: "Task gate",
+			description: "Accept or reject the current Task assignment before work begins.",
+			parameters: {
+				type: "object",
+				properties: { decision: { type: "string", enum: ["accept", "reject"] }, reason: { type: "string" } },
+				required: ["decision"],
+				additionalProperties: false,
+			} as AgentTool["parameters"],
+			execute: async (_toolCallId: string, rawParams: unknown) => {
+				const params = rawParams as { decision?: unknown; reason?: unknown };
+				if (params.decision !== "accept" && params.decision !== "reject")
+					throw new Error("Invalid task_gate decision");
+				if (params.reason !== undefined && typeof params.reason !== "string")
+					throw new Error("Invalid task_gate reason");
+				if (params.decision === "accept") {
+					if (admission.accepted)
+						return {
+							content: [{ type: "text", text: `Already accepted ${goalId}/${taskId}` }],
+							details: undefined,
+						};
+					admission.accepted = true;
+					await updateTaskStatus(piRoot, goalId, taskId, { status: "ACTIVE" });
+					activateTaskTools();
+					return { content: [{ type: "text", text: `Accepted ${goalId}/${taskId}` }], details: undefined };
+				}
+				if (admission.accepted) throw new Error("Cannot reject an accepted Task");
+				await unassignTask(piRoot, goalId, taskId);
+				admission.resulted = true;
+				await this.notifyTaskChange(
+					goalId,
+					taskId,
+					"READY",
+					assignment.sessionId,
+					`executor rejected assignment${params.reason ? `: ${params.reason}` : ""}`,
+				);
+				return { content: [{ type: "text", text: `Rejected ${goalId}/${taskId}` }], details: params.reason };
+			},
+		});
+		const taskResult = slot.session.installTemporaryTool({
+			name: "task_result",
+			label: "Task result",
+			description:
+				"The only formal exit for the current Task tenure. When the Completion criteria are satisfied, call task_result with outcome=complete before any unrelated work or settling; do not claim completion only in text. After saving necessary durable memory, call outcome=terminated when instructed to terminate.",
+			parameters: {
+				type: "object",
+				properties: {
+					outcome: { type: "string", enum: ["complete", "terminated"] },
+					result: { type: "string" },
+					remaining: { type: "string" },
+					reason: { type: "string" },
+				},
+				required: ["outcome"],
+				additionalProperties: false,
+			} as AgentTool["parameters"],
+			execute: async (_toolCallId: string, rawParams: unknown) => {
+				if (!admission.accepted) throw new Error("Task gate must be accepted before task_result");
+				const params = rawParams as { outcome?: unknown; result?: unknown; remaining?: unknown; reason?: unknown };
+				if (params.outcome !== "complete" && params.outcome !== "terminated")
+					throw new Error("Invalid task_result outcome");
+				if (params.result !== undefined && typeof params.result !== "string")
+					throw new Error("Invalid task_result result");
+				if (params.remaining !== undefined && typeof params.remaining !== "string")
+					throw new Error("Invalid task_result remaining");
+				if (params.outcome === "complete")
+					await completeTask(piRoot, goalId, taskId, { result: params.result, remaining: params.remaining });
+				else
+					await updateTaskStatus(piRoot, goalId, taskId, {
+						status: "DEFERRED",
+						result: params.result,
+						remaining: params.remaining,
+					});
+				admission.resulted = true;
+				await unassignTask(piRoot, goalId, taskId);
+				await this.notifyTaskChange(
+					goalId,
+					taskId,
+					params.outcome === "complete" ? "DONE" : "DEFERRED",
+					assignment.sessionId,
+					`executor reported ${params.outcome}`,
+				);
+				return {
+					content: [{ type: "text", text: `Recorded ${params.outcome} for ${goalId}/${taskId}` }],
+					details: params.reason,
+				};
+			},
+		});
+		const removeMemoryTool = slot.session.installTemporaryTool({
+			name: "task_memory",
+			label: "Task memory",
+			description:
+				"Save durable progress, decisions, evidence, blockers, or next steps to the currently assigned Task Markdown.",
+			parameters: {
+				type: "object",
+				properties: { memory: { type: "string" } },
+				required: ["memory"],
+				additionalProperties: false,
+			} as AgentTool["parameters"],
+			execute: async (_toolCallId: string, rawParams: unknown) => {
+				if (!admission.accepted) throw new Error("Task gate must be accepted before task_memory");
+				if (typeof rawParams !== "object" || rawParams === null || Array.isArray(rawParams))
+					throw new Error("Invalid Task memory parameters");
+				const memory = (rawParams as { memory?: unknown }).memory;
+				if (typeof memory !== "string" || memory.trim() === "")
+					throw new Error("Task memory must be a non-empty string");
+				const result = await updateTaskMemory(piRoot, goalId, taskId, { memory });
+				return {
+					content: [{ type: "text", text: `Updated durable memory for ${goalId}/${taskId}` }],
+					details: result.task.path,
+				};
+			},
+		});
+		slot.session.setTaskSessionProtocol(
+			[
+				"This is a long-lived assigned Task Session.",
+				"Task Markdown is the lifecycle SSOT and durable memory; chat history is working memory, not the only authority.",
+				"Users may participate normally at any time. Settling does not complete or unassign the Task.",
+				"First call task_gate with accept or reject. If accepted, the Task becomes ACTIVE. If you naturally settle without task_result, the Task is treated as BLOCKED while this assignment remains.",
+				"task_result is the only formal exit from this Task tenure. Once the Completion criteria are satisfied, you MUST call task_result(outcome=complete, result=...) before unrelated work or natural settling; a text claim that the Task is complete is not sufficient. If termination is instructed, save necessary durable memory with task_memory, then MUST call task_result(outcome=terminated, reason=..., remaining=...).",
+				"task_memory is optional durable memory; it does not replace the required task_result lifecycle action when Completion is satisfied or termination is instructed.",
+				"When durable information should survive compaction, restart, reassignment, or long pauses, decide whether to use task_memory; do not write transient reasoning or chat noise mechanically.",
+			].join("\n"),
+		);
+		const payload = [
+			"Begin work on the assigned Task below. Read the Task Markdown before acting.",
+			"Task Markdown is the Task lifecycle authority and durable memory.",
+			"Read the task file and work in this Session's cwd.",
+			"Write important decisions, results, evidence, blockers, invariants, and next steps back to task.md.",
+			"Settling this Session does not complete the Task. Only the controlled Task lifecycle mutation can set DONE or CANCELLED.",
+			"Continue this same Task and Session on later user messages or recovery.",
+			"",
+			`Goal: ${goalId}`,
+			`Task: ${taskId}`,
+			`Task file: ${task.path}`,
+			`Status: ${task.status ?? "(unspecified)"}`,
+			"",
+			`Objective: ${task.objective ?? "(none)"}`,
+			`Work area: ${task.workArea ?? "(unspecified)"}`,
+			`Inputs: ${task.inputs ?? "(none)"}`,
+			`Completion: ${task.completion ?? "(none)"}`,
+			...(task.result === undefined ? [] : [`Current result: ${task.result}`]),
+			...(task.remaining === undefined ? [] : [`Current remaining: ${task.remaining}`]),
+		].join("\n");
+		activateTaskTools = () => slot.session.setActiveToolsByName([...previousTools, "task_memory", "task_result"]);
+		if (options?.admitted) activateTaskTools();
+		else slot.session.setActiveToolsByName(["task_gate"]);
+		this.taskSessionBindings.set(assignment.sessionId, () => {
+			removeLifecycleListener();
+			this.taskSessionAdmission.delete(assignment.sessionId);
+			taskGate();
+			taskResult();
+			removeMemoryTool();
+		});
+		if (!options?.admitted) await slot.session.prompt(payload, { expandPromptTemplates: false, source: "extension" });
+	}
+
+	private async rebindAssignedTask(session: AgentSession): Promise<void> {
+		const assignment = this.getSessionAssignment(session.sessionManager.getSessionId());
+		if (!assignment) return;
+		const task = readTask(this.associationRoot(), assignment.goalId, assignment.taskId);
+		const status = parseTaskStatus(task.status);
+		if (status === "ACTIVE" || status === "BLOCKED") {
+			await this.startAssignedTask(assignment.goalId, assignment.taskId, { admitted: true });
+		} else if (status === "READY" || status === "DEFERRED") {
+			await this.startAssignedTask(assignment.goalId, assignment.taskId);
+		}
 	}
 
 	setRebindSession(rebindSession?: (session: AgentSession) => Promise<void>): void {
@@ -191,14 +961,39 @@ export class AgentSessionRuntime {
 		// results) is persisted to the outgoing session before it is replaced.
 		this._sessionPool.suppressCompletion(slot.id);
 		await slot.session.abort();
-		await emitSessionShutdownEvent(slot.session.extensionRunner, {
-			type: "session_shutdown",
-			reason,
-			targetSessionFile,
-		});
-		if (slot.id === this._sessionPool.foregroundSlotId) this.beforeSessionInvalidate?.();
-		slot.session.dispose();
-		if (remove) this._sessionPool.removeClosed(slot.id);
+		this._sessionPool.deactivate(slot.id);
+		const cleanupErrors: unknown[] = [];
+		try {
+			await emitSessionShutdownEvent(slot.session.extensionRunner, {
+				type: "session_shutdown",
+				reason,
+				targetSessionFile,
+			});
+		} catch (error) {
+			cleanupErrors.push(error);
+		}
+		try {
+			if (slot.id === this._sessionPool.foregroundSlotId) this.beforeSessionInvalidate?.();
+		} catch (error) {
+			cleanupErrors.push(error);
+		}
+		try {
+			slot.session.dispose();
+		} catch (error) {
+			cleanupErrors.push(error);
+		}
+		if (remove) {
+			try {
+				this._sessionPool.removeClosed(slot.id);
+			} catch (error) {
+				cleanupErrors.push(error);
+			}
+		}
+		if (cleanupErrors.length > 0)
+			throw new AggregateError(
+				cleanupErrors,
+				`Session cleanup failed for ${slot.session.sessionManager.getSessionId()}`,
+			);
 	}
 
 	async parkForeground(): Promise<void> {
@@ -232,6 +1027,10 @@ export class AgentSessionRuntime {
 		if (this.rebindSession) {
 			await this.rebindSession(this.session);
 		}
+		// Host rebinds (for example RPC bindExtensions) may rebuild the active
+		// tool set. Restore the durable Task binding last so lifecycle tools are
+		// the final active set for the resumed Executor.
+		await this.rebindAssignedTask(this.session);
 		if (withSession) {
 			await withSession(this.session.createReplacedSessionContext());
 		}
@@ -302,6 +1101,10 @@ export class AgentSessionRuntime {
 		cwd?: string;
 	}): Promise<{ result: CreateAgentSessionRuntimeResult; sessionManager: SessionManager }> {
 		const targetCwd = options?.cwd ? resolvePath(options.cwd) : this.cwd;
+		const controlCwd = getPiRootControlCwd();
+		if (controlCwd === targetCwd) {
+			throw new ControlSessionAlreadyExistsError();
+		}
 		// Defense-in-depth: SessionManager.create also enforces this.
 		assertCwdInsidePiRoot(targetCwd);
 		const previousSessionFile = this.session.sessionFile;
@@ -498,9 +1301,46 @@ export class AgentSessionRuntime {
 		return { cancelled: false };
 	}
 
+	listActiveSessions(): Array<{ row?: unknown; slot: SessionSlot }> {
+		const registry = getSessionRegistry();
+		if (!registry) return this._sessionPool.list().map((slot) => ({ slot }));
+		return registry.activeRows().map((row) => {
+			const slot = this._sessionPool.findBySessionId(row.session_id);
+			if (!slot) throw new Error(`Session registry active row has no live slot: ${row.session_id}`);
+			return { row, slot };
+		});
+	}
+
+	listInactiveSessions() {
+		const registry = getSessionRegistry();
+		if (!registry) return [];
+		return registry.inactiveRows().map((row) => {
+			if (!row.session_file)
+				throw new Error(`Session catalog entry is invalid: missing session file (${row.session_id})`);
+			return row;
+		});
+	}
+
+	assertSessionPoolRegistryConsistency(): void {
+		const registry = getSessionRegistry();
+		if (!registry) return;
+		const active = registry.activeRows();
+		for (const row of active) {
+			if (!this._sessionPool.findBySessionId(row.session_id))
+				throw new Error(`Session registry active row has no live slot: ${row.session_id}`);
+		}
+		for (const slot of this._sessionPool.list()) {
+			const id = slot.session.sessionManager.getSessionId();
+			if (!active.some((row) => row.session_id === id))
+				throw new Error(`Live session slot has no active registry row: ${id}`);
+		}
+	}
+
 	async abortSession(slotId: string): Promise<boolean> {
 		const slot = this._sessionPool.get(slotId);
 		if (!slot || !slot.activity.busy) return false;
+		if (slot.session.sessionManager.getSessionId() === getSessionRegistry()?.canonicalControlSessionId())
+			return false;
 		this._sessionPool.suppressCompletion(slotId);
 		await slot.session.abort();
 		return true;
@@ -509,6 +1349,8 @@ export class AgentSessionRuntime {
 	async closeSession(slotId: string, reason: SessionShutdownEvent["reason"] = "quit"): Promise<boolean> {
 		const slot = this._sessionPool.get(slotId);
 		if (!slot) return false;
+		if (slot.session.sessionManager.getSessionId() === getSessionRegistry()?.canonicalControlSessionId())
+			return false;
 		if (this._sessionPool.list().length === 1) return false;
 		const wasForeground = slot.id === this._sessionPool.foregroundSlotId;
 		if (wasForeground) {

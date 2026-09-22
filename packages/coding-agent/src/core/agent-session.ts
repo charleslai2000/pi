@@ -326,6 +326,7 @@ export class AgentSession {
 	private _eventListeners: AgentSessionEventListener[] = [];
 	private _isAgentRunActive = false;
 	private _agentRunAbortRequested = false;
+	private _executionStopRequested?: () => boolean;
 	private _idleWaitPromise: Promise<void> | undefined;
 	private _resolveIdleWait: (() => void) | undefined;
 
@@ -360,6 +361,9 @@ export class AgentSession {
 
 	private _resourceLoader: ResourceLoader;
 	private _customTools: ToolDefinition[];
+	/** SDK-installed temporary tools remain part of canonical registry refreshes until disposed. */
+	private _temporaryTools = new Map<string, AgentTool>();
+	private _activeTemporaryToolNames = new Set<string>();
 	private _baseToolDefinitions: Map<string, ToolDefinition> = new Map();
 	private _cwd: string;
 	private _extensionRunnerRef?: { current?: ExtensionRunner };
@@ -386,6 +390,7 @@ export class AgentSession {
 	private _toolPromptGuidelines: Map<string, string[]> = new Map();
 
 	private _baseSystemPromptOptions!: NormalizedBuildSystemPromptOptions;
+	private _taskSessionProtocol?: string;
 	/** Prompt options after before_agent_start mutations for the active run. */
 	private _runSystemPromptOptions?: NormalizedBuildSystemPromptOptions;
 
@@ -1019,9 +1024,12 @@ export class AgentSession {
 	 * Changes take effect on the next agent turn.
 	 */
 	setActiveToolsByName(toolNames: string[]): void {
+		const composedToolNames = [...toolNames, ...this._activeTemporaryToolNames].filter(
+			(name, index, names) => names.indexOf(name) === index,
+		);
 		const tools: AgentTool[] = [];
 		const validToolNames: string[] = [];
-		for (const name of toolNames) {
+		for (const name of composedToolNames) {
 			const tool = this._toolRegistry.get(name);
 			if (tool) {
 				tools.push(tool);
@@ -1029,7 +1037,26 @@ export class AgentSession {
 			}
 		}
 		this.agent.state.tools = tools;
+		this._activeTemporaryToolNames = new Set(validToolNames.filter((name) => this._temporaryTools.has(name)));
 		this._rebuildSystemPrompt(validToolNames);
+	}
+
+	installTemporaryTool(tool: AgentTool): () => void {
+		if (this._toolRegistry.has(tool.name) || this._temporaryTools.has(tool.name))
+			throw new Error(`Tool already registered: ${tool.name}`);
+		this._temporaryTools.set(tool.name, tool);
+		this._toolRegistry.set(tool.name, tool);
+		this._toolDefinitions.set(tool.name, {
+			definition: createToolDefinitionFromAgentTool(tool),
+			sourceInfo: createSyntheticSourceInfo(`<temporary:${tool.name}>`, { source: "sdk" }),
+		});
+		return () => {
+			this._activeTemporaryToolNames.delete(tool.name);
+			this._temporaryTools.delete(tool.name);
+			this._toolRegistry.delete(tool.name);
+			this._toolDefinitions.delete(tool.name);
+			this.setActiveToolsByName(this.getActiveToolNames().filter((name) => name !== tool.name));
+		};
 	}
 
 	/** Whether compaction or branch summarization is currently running */
@@ -1077,6 +1104,11 @@ export class AgentSession {
 	}
 
 	/** Update scoped models for cycling */
+	setTaskSessionProtocol(protocol: string | undefined): void {
+		this._taskSessionProtocol = protocol;
+		this._rebuildSystemPrompt(this.getActiveToolNames());
+	}
+
 	setScopedModels(scopedModels: Array<{ model: Model<any>; thinkingLevel?: ThinkingLevel }>): void {
 		this._scopedModels = scopedModels;
 	}
@@ -1120,7 +1152,10 @@ export class AgentSession {
 
 		const loaderSystemPrompt = this._resourceLoader.getSystemPrompt();
 		const loaderAppendSystemPrompt = this._resourceLoader.getAppendSystemPrompt();
-		const appendSystemPrompt = loaderAppendSystemPrompt.length > 0 ? loaderAppendSystemPrompt.join("\n\n") : "";
+		const appendSystemPrompt = [
+			...loaderAppendSystemPrompt,
+			...(this._taskSessionProtocol ? [this._taskSessionProtocol] : []),
+		].join("\n\n");
 		const loadedSkills = this._resourceLoader.getSkills().skills;
 		const loadedContextFiles = this._resourceLoader.getAgentsFiles().agentsFiles;
 
@@ -1150,7 +1185,13 @@ export class AgentSession {
 		options: NormalizedBuildSystemPromptOptions,
 		messages: AgentMessage[] = this.agent.state.messages,
 	): SystemMessage | undefined {
-		options.selectedTools = [...new Set(options.selectedTools)].filter((name) => this._toolRegistry.has(name));
+		// Prompt/extension projections may provide a fresh ordinary-tool list. Preserve
+		// temporary tools that are currently active so the canonical Task binding is not
+		// dropped at the provider boundary.
+		const activeTemporaryTools = Array.from(this._activeTemporaryToolNames);
+		options.selectedTools = [...new Set([...options.selectedTools, ...activeTemporaryTools])].filter((name) =>
+			this._toolRegistry.has(name),
+		);
 		this.agent.state.tools = options.selectedTools.flatMap((name) => {
 			const tool = this._toolRegistry.get(name);
 			return tool ? [tool] : [];
@@ -1193,9 +1234,13 @@ export class AgentSession {
 	private _restoreToolsFromTranscript(): void {
 		const current = getCurrentSystemMessage(this.sessionManager.buildSessionContext().messages);
 		if (!current) return;
-		const toolNames = (current.toolsAdded ?? [])
+		const transcriptToolNames = (current.toolsAdded ?? [])
 			.map((tool) => tool.name)
 			.filter((name) => this._toolRegistry.has(name));
+		const toolNames = [
+			...transcriptToolNames,
+			...Array.from(this._temporaryTools.keys()).filter((name) => this._toolRegistry.has(name)),
+		].filter((name, index, names) => names.indexOf(name) === index);
 		this.agent.state.tools = toolNames.flatMap((name) => {
 			const registered = this._toolRegistry.get(name);
 			return registered ? [registered] : [];
@@ -1213,7 +1258,7 @@ export class AgentSession {
 		try {
 			await this.agent.prompt(messages);
 			while (await this._handlePostAgentRun()) {
-				if (this._agentRunAbortRequested) break;
+				if (this._agentRunAbortRequested || this._executionStopRequested?.()) break;
 				await this.agent.continue();
 			}
 		} finally {
@@ -1235,6 +1280,7 @@ export class AgentSession {
 		if (!msg) {
 			return false;
 		}
+		if (this._executionStopRequested?.()) return false;
 
 		if (this._isRetryableError(msg) && (await this._prepareRetry(msg))) {
 			if (this._agentRunAbortRequested) this._finishCancelledRetry();
@@ -1255,8 +1301,9 @@ export class AgentSession {
 			this._retryAttempt = 0;
 		}
 
+		if (this._executionStopRequested?.()) return false;
 		if (await this._checkCompaction(msg)) {
-			return !this._agentRunAbortRequested;
+			return !this._agentRunAbortRequested && !this._executionStopRequested?.();
 		}
 
 		// The agent loop drains both queues before emitting agent_end. Any messages
@@ -2397,6 +2444,7 @@ export class AgentSession {
 	 * @returns Whether the post-run loop should call `agent.continue()`
 	 */
 	private async _runAutoCompaction(reason: "overflow" | "threshold", willRetry: boolean): Promise<boolean> {
+		if (this._executionStopRequested?.()) return false;
 		const model = this.model;
 		const settings = this.settingsManager.getCompactionSettings(model);
 		let abortController: AbortController | undefined;
@@ -2820,6 +2868,10 @@ export class AgentSession {
 				definition,
 				sourceInfo: createSyntheticSourceInfo(`<sdk:${definition.name}>`, { source: "sdk" }),
 			})),
+			...Array.from(this._temporaryTools.values()).map((tool) => ({
+				definition: createToolDefinitionFromAgentTool(tool),
+				sourceInfo: createSyntheticSourceInfo(`<temporary:${tool.name}>`, { source: "sdk" }),
+			})),
 		].filter((tool) => isAllowedTool(tool.definition.name));
 		const definitionRegistry = new Map<string, ToolDefinitionEntry>(
 			Array.from(this._baseToolDefinitions.entries())
@@ -2871,6 +2923,9 @@ export class AgentSession {
 		for (const tool of wrappedExtensionTools as AgentTool[]) {
 			toolRegistry.set(tool.name, tool);
 		}
+		for (const tool of this._temporaryTools.values()) {
+			if (isAllowedTool(tool.name)) toolRegistry.set(tool.name, tool);
+		}
 		this._toolRegistry = toolRegistry;
 
 		const nextActiveToolNames = (
@@ -2895,6 +2950,12 @@ export class AgentSession {
 			}
 		}
 
+		// Temporary SDK tools are canonical session tools while installed. They must
+		// survive any registry refresh, including refreshes with an explicit base
+		// active-tool list; disposal removes them from this composition.
+		for (const tool of this._temporaryTools.values()) {
+			if (isAllowedTool(tool.name)) nextActiveToolNames.push(tool.name);
+		}
 		this.setActiveToolsByName([...new Set(nextActiveToolNames)]);
 	}
 

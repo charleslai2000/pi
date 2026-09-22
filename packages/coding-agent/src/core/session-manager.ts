@@ -1039,6 +1039,7 @@ export class SessionManager {
 		if (this.persist) {
 			const fileTimestamp = timestamp.replace(/[:.]/g, "-");
 			this.sessionFile = join(this.getSessionDir(), `${fileTimestamp}_${this.sessionId}.jsonl`);
+			if (getPiRoot() !== undefined) this.persistSessionHeader();
 		}
 		return this.sessionFile;
 	}
@@ -1256,6 +1257,12 @@ export class SessionManager {
 		};
 		this._appendEntry(entry);
 		return entry.id;
+	}
+
+	/** Persist the current session header for application-owned sessions. */
+	persistSessionHeader(): void {
+		this._rewriteFile();
+		this.flushed = true;
 	}
 
 	/** Append a session info entry (e.g., display name). Returns entry id. */

@@ -63,7 +63,11 @@ import {
 	VERSION,
 } from "../../config.ts";
 import { type AgentSession, type AgentSessionEvent, parseSkillBlock } from "../../core/agent-session.ts";
-import { type AgentSessionRuntime, SessionImportFileNotFoundError } from "../../core/agent-session-runtime.ts";
+import {
+	type AgentSessionRuntime,
+	ControlSessionAlreadyExistsError,
+	SessionImportFileNotFoundError,
+} from "../../core/agent-session-runtime.ts";
 import type { AgentSessionRuntimeDiagnostic } from "../../core/agent-session-services.ts";
 import {
 	CACHE_TTL_MS,
@@ -109,6 +113,7 @@ import {
 	sessionEntryToContextMessages,
 	type UsageEntry,
 } from "../../core/session-manager.ts";
+import { syncSessionRegistryName } from "../../core/session-registry.ts";
 import type { FullscreenExitOutput, TuiMode } from "../../core/settings-manager.ts";
 import { BUILTIN_SLASH_COMMANDS } from "../../core/slash-commands.ts";
 import type { SourceInfo } from "../../core/source-info.ts";
@@ -395,6 +400,8 @@ export interface InteractiveModeOptions {
 	initialThemeSetting?: string;
 	/** Terminal implementation. Defaults to the current process terminal. */
 	terminal?: Terminal;
+	/** Application-owned cleanup after live runtime disposal. */
+	onRuntimeDisposed?: () => void;
 }
 
 export class InteractiveMode {
@@ -1016,6 +1023,13 @@ export class InteractiveMode {
 			// Minimal header when silenced
 			this.builtInHeader = new Text("", 0, 0);
 			this.headerContainer.addChild(this.builtInHeader);
+		}
+		const piRoot = getPiRoot();
+		if (piRoot !== undefined) {
+			this.headerContainer.addChild(
+				new Text(`PiRoot: ${piRoot}\nSession cwd: ${this.sessionManager.getCwd()}`, 1, 0),
+			);
+			this.headerContainer.addChild(new Spacer(1));
 		}
 		this.ui.requestRender();
 
@@ -3208,6 +3222,46 @@ export class InteractiveMode {
 				this.editor.setText("");
 				return;
 			}
+			if (text === "/complete" || text.startsWith("/complete ")) {
+				await this.handleTaskTerminalCommand(text, "complete");
+				this.editor.setText("");
+				return;
+			}
+			if (text === "/cancel" || text.startsWith("/cancel ")) {
+				await this.handleTaskTerminalCommand(text, "cancel");
+				this.editor.setText("");
+				return;
+			}
+			if (text === "/assign" || text.startsWith("/assign ")) {
+				await this.handleAssignmentCommand(text);
+				this.editor.setText("");
+				return;
+			}
+			if (text === "/reassign" || text.startsWith("/reassign ")) {
+				await this.handleReassignCommand(text);
+				this.editor.setText("");
+				return;
+			}
+			if (text === "/unassign" || text.startsWith("/unassign ")) {
+				await this.handleUnassignCommand(text);
+				this.editor.setText("");
+				return;
+			}
+			if (text === "/assignment" || text.startsWith("/assignment ")) {
+				this.handleAssignmentQueryCommand(text);
+				this.editor.setText("");
+				return;
+			}
+			if (text === "/task" || text.startsWith("/task ")) {
+				this.handleTaskViewCommand(text);
+				this.editor.setText("");
+				return;
+			}
+			if (text === "/frontier") {
+				this.handleFrontierViewCommand();
+				this.editor.setText("");
+				return;
+			}
 			if (text === "/sessions") {
 				this.showLiveSessionSelector();
 				this.editor.setText("");
@@ -4119,6 +4173,7 @@ export class InteractiveMode {
 			// which the stdout/stderr error handler turns into emergencyTerminalExit;
 			// the render loop is already idle, so this cannot hot-spin (see #4144).
 			await this.runtimeHost.dispose();
+			this.options.onRuntimeDisposed?.();
 			this.themeController.disableAutoSync();
 			await this.ui.terminal.drainInput(1000);
 			this.stop();
@@ -4140,6 +4195,7 @@ export class InteractiveMode {
 		// this.sessionManager afterwards throws "Session pool has no foreground slot".
 		const resumeCommand = formatResumeCommand(this.sessionManager);
 		await this.runtimeHost.dispose();
+		this.options.onRuntimeDisposed?.();
 
 		if (resumeCommand) {
 			process.stdout.write(`${chalk.dim("To resume this session:")} ${resumeCommand}\n`);
@@ -5518,40 +5574,46 @@ export class InteractiveMode {
 
 	private showLiveSessionSelector(): void {
 		this.showSelector((done) => {
-			const selector = new LiveSessionSelector(this.runtimeHost.sessionPool.list(), {
-				foregroundSlotId: this.runtimeHost.sessionPool.foregroundSlotId!,
-				onSwitch: async (slotId) => {
-					if (slotId !== this.runtimeHost.sessionPool.foregroundSlotId) {
-						await this.runtimeHost.switchForeground(slotId);
-					}
-					done();
+			const selector = new LiveSessionSelector(
+				this.runtimeHost.listActiveSessions().map(({ slot }) => slot),
+				{
+					foregroundSlotId: this.runtimeHost.sessionPool.foregroundSlotId!,
+					onSwitch: async (slotId) => {
+						if (slotId !== this.runtimeHost.sessionPool.foregroundSlotId) {
+							await this.runtimeHost.switchForeground(slotId);
+						}
+						done();
+					},
+					onClose: async (slotId) => {
+						if (await this.runtimeHost.closeSession(slotId)) done();
+					},
+					onAbort: async (slotId) => {
+						if (await this.runtimeHost.abortSession(slotId)) this.showStatus("Session operation aborted");
+					},
+					onCancel: done,
 				},
-				onClose: async (slotId) => {
-					if (await this.runtimeHost.closeSession(slotId)) done();
-				},
-				onAbort: async (slotId) => {
-					if (await this.runtimeHost.abortSession(slotId)) this.showStatus("Session operation aborted");
-				},
-				onCancel: done,
-			});
+			);
 			return { component: selector, focus: selector };
 		});
 	}
 
 	private showSessionSelector(): void {
 		this.showSelector((done) => {
+			const loadInactive = async () =>
+				this.runtimeHost.listInactiveSessions().map((row) => ({
+					path: row.session_file ?? "",
+					id: row.session_id,
+					cwd: row.cwd,
+					name: row.name ?? undefined,
+					created: new Date(row.updated_at),
+					modified: new Date(row.updated_at),
+					messageCount: 0,
+					firstMessage: "",
+					allMessagesText: "",
+				}));
 			const selector = new SessionSelectorComponent(
-				(onProgress, signal) =>
-					SessionManager.list(
-						this.sessionManager.getCwd(),
-						this.sessionManager.getSessionDir(),
-						onProgress,
-						signal,
-					),
-				(onProgress, signal) =>
-					this.sessionManager.usesDefaultSessionDir()
-						? SessionManager.listAll(onProgress, signal)
-						: SessionManager.listAll(this.sessionManager.getSessionDir(), onProgress, signal),
+				async () => loadInactive(),
+				async () => loadInactive(),
 				async (sessionPath) => {
 					done();
 					await this.handleResumeSession(sessionPath);
@@ -6423,6 +6485,9 @@ export class InteractiveMode {
 		}
 
 		this.session.setSessionName(name);
+		if (typeof this.sessionManager.getSessionId === "function") {
+			syncSessionRegistryName(this.sessionManager.getSessionId(), this.sessionManager.getSessionName());
+		}
 		const sessionName = this.sessionManager.getSessionName();
 		if (sessionName !== name) {
 			this.showWarning(`Session name was normalized from ${JSON.stringify(name)} to ${JSON.stringify(sessionName)}`);
@@ -6430,6 +6495,149 @@ export class InteractiveMode {
 		this.chatContainer.addChild(new Spacer(1));
 		this.chatContainer.addChild(new Text(theme.fg("dim", `Session name set: ${sessionName ?? name}`), 1, 0));
 		this.ui.requestRender();
+	}
+
+	private parseTaskIdentity(value: string): { goalId: string; taskId: string } {
+		const parts = value.trim().split("/");
+		if (parts.length !== 2 || !parts[0] || !parts[1] || parts.some((part) => part === "." || part === ".."))
+			throw new Error("Usage: <goal-id>/<task-id>");
+		return { goalId: parts[0], taskId: parts[1] };
+	}
+
+	private async handleTaskTerminalCommand(text: string, operation: "complete" | "cancel"): Promise<void> {
+		try {
+			const command = `/${operation}`;
+			const identity = this.parseTaskIdentity(text.slice(command.length));
+			const result =
+				operation === "complete"
+					? await this.runtimeHost.completeTask(identity.goalId, identity.taskId)
+					: await this.runtimeHost.cancelTask(identity.goalId, identity.taskId);
+			if (!result.changed) {
+				this.showStatus(operation === "complete" ? "Task is already complete" : "Task is already cancelled");
+				return;
+			}
+			this.showStatus(
+				`${operation === "complete" ? "Completed" : "Cancelled"} ${identity.goalId}/${identity.taskId}`,
+			);
+		} catch (error) {
+			this.showError(error instanceof Error ? error.message : String(error));
+		}
+	}
+
+	private async handleAssignmentCommand(text: string): Promise<void> {
+		try {
+			const identity = this.parseTaskIdentity(text.slice("/assign".length));
+			const session = this.runtimeHost.session;
+			const result = await this.runtimeHost.assignTask(
+				identity.goalId,
+				identity.taskId,
+				session.sessionManager.getSessionId(),
+			);
+			if (result.changed) await this.runtimeHost.startAssignedTask(identity.goalId, identity.taskId);
+			this.showStatus(
+				result.changed
+					? `Assigned ${identity.goalId}/${identity.taskId} to ${session.sessionManager.getSessionName() ?? session.sessionManager.getSessionId()}`
+					: `${identity.goalId}/${identity.taskId} is already assigned to this session`,
+			);
+		} catch (error) {
+			this.showError(error instanceof Error ? error.message : String(error));
+		}
+	}
+
+	private async handleReassignCommand(text: string): Promise<void> {
+		try {
+			const args = text.slice("/reassign".length).trim().split(/\s+/);
+			if (args.length !== 2) throw new Error("Usage: /reassign <goal-id>/<task-id> <session-id>");
+			const identity = this.parseTaskIdentity(args[0]!);
+			const result = await this.runtimeHost.reassignTask(identity.goalId, identity.taskId, args[1]!);
+			if (result.changed && this.runtimeHost.sessionPool.findBySessionId(args[1]!)) {
+				await this.runtimeHost.startAssignedTask(identity.goalId, identity.taskId);
+			}
+			this.showStatus(
+				result.changed ? `Reassigned ${args[0]} to ${args[1]}` : `${args[0]} is already assigned to ${args[1]}`,
+			);
+		} catch (error) {
+			this.showError(error instanceof Error ? error.message : String(error));
+		}
+	}
+
+	private async handleUnassignCommand(text: string): Promise<void> {
+		try {
+			const identity = this.parseTaskIdentity(text.slice("/unassign".length));
+			const result = await this.runtimeHost.unassignTask(identity.goalId, identity.taskId);
+			this.showStatus(
+				result.changed
+					? `Unassigned ${identity.goalId}/${identity.taskId}`
+					: `No assignment for ${identity.goalId}/${identity.taskId}`,
+			);
+		} catch (error) {
+			this.showError(error instanceof Error ? error.message : String(error));
+		}
+	}
+
+	private handleAssignmentQueryCommand(text: string): void {
+		try {
+			const argument = text.slice("/assignment".length).trim();
+			const assignment = argument
+				? (() => {
+						const identity = this.parseTaskIdentity(argument);
+						return this.runtimeHost.getTaskAssignment(identity.goalId, identity.taskId);
+					})()
+				: this.runtimeHost.getSessionAssignment(this.runtimeHost.session.sessionManager.getSessionId());
+			if (!assignment) {
+				this.showStatus("No current task assignment");
+				return;
+			}
+			this.showStatus(
+				`${assignment.goalId}/${assignment.taskId} → ${assignment.sessionName ?? assignment.sessionId} (${assignment.runtimeState}, ${assignment.cwd ?? "unknown cwd"})`,
+			);
+		} catch (error) {
+			this.showError(error instanceof Error ? error.message : String(error));
+		}
+	}
+
+	private handleTaskViewCommand(text: string): void {
+		try {
+			const identity = this.parseTaskIdentity(text.slice("/task".length));
+			const view = this.runtimeHost.getTaskControlView(identity.goalId, identity.taskId);
+			const lines = [
+				`${view.goalId}/${view.taskId}`,
+				`Status: ${view.taskStatus ?? "unknown"}`,
+				`Work area: ${view.workArea ?? "unknown"}`,
+				`Frontier: ${view.frontier?.state ?? "none"}`,
+				...(view.frontier?.next ? [`Next: ${view.frontier.next}`] : []),
+				`Assigned: ${view.assignment ? (view.assignment.sessionName ?? view.assignment.sessionId) : "none"}`,
+				...(view.assignment
+					? [`Runtime: ${view.assignment.runtimeState}`, `cwd: ${view.assignment.cwd ?? "unknown"}`]
+					: []),
+				...(view.warnings.length ? [`Warnings: ${view.warnings.join(", ")}`] : []),
+			];
+			this.showStatus(lines.join("\n"));
+		} catch (error) {
+			this.showError(error instanceof Error ? error.message : String(error));
+		}
+	}
+
+	private handleFrontierViewCommand(): void {
+		try {
+			const views = this.runtimeHost.listFrontierControlViews();
+			if (views.length === 0) {
+				this.showStatus("No frontier entries");
+				return;
+			}
+			const lines: string[] = [];
+			for (const [index, view] of views.entries()) {
+				const task = view.taskId ? `${view.goalId}/${view.taskId}` : view.goalId;
+				const taskState = view.taskStatus ?? "unknown";
+				const session = view.assignment ? (view.assignment.sessionName ?? view.assignment.sessionId) : "unassigned";
+				lines.push(`${index + 1}. ${task}`, `   ${taskState} · ${view.frontier?.state ?? "unknown"} · ${session}`);
+				if (view.frontier?.blocker) lines.push(`   Blocker: ${view.frontier.blocker}`);
+				if (view.frontier?.next) lines.push(`   Next: ${view.frontier.next}`);
+			}
+			this.showStatus(lines.join("\n"));
+		} catch (error) {
+			this.showError(error instanceof Error ? error.message : String(error));
+		}
 	}
 
 	private handleRootCommand(): void {
@@ -6722,6 +6930,10 @@ export class InteractiveMode {
 			);
 			this.ui.requestRender();
 		} catch (error: unknown) {
+			if (error instanceof ControlSessionAlreadyExistsError) {
+				this.showWarning(error.message);
+				return;
+			}
 			await this.handleFatalRuntimeError("Failed to create session", error);
 		}
 	}

@@ -2,6 +2,7 @@ import { execFileSync } from "node:child_process";
 import { realpathSync } from "node:fs";
 import type { AgentSession } from "./agent-session.ts";
 import type { AgentSessionServices } from "./agent-session-services.ts";
+import { deactivateSessionRegistry, syncSessionRegistry } from "./session-registry.ts";
 
 export interface SessionActivity {
 	busy: boolean;
@@ -116,6 +117,17 @@ export class SessionPool {
 	private _foregroundSlotId: string | undefined;
 	private readonly activityListeners = new Set<(event: SessionActivityEvent) => void>();
 	private readonly conflictRoots = new Set<string>();
+	private failNextClose = false;
+
+	deactivate(slotId: string): void {
+		const slot = this.slots.get(slotId);
+		if (!slot) throw new Error(`Unknown session slot: ${slotId}`);
+		deactivateSessionRegistry(slot.session.sessionManager.getSessionId());
+	}
+
+	setFaults(faults: { nextClose?: boolean }): void {
+		this.failNextClose = faults.nextClose === true;
+	}
 
 	suppressCompletion(slotId: string): void {
 		this.slots.get(slotId)?.suppressCompletion();
@@ -150,6 +162,7 @@ export class SessionPool {
 
 	adopt(session: AgentSession, services: AgentSessionServices): SessionSlot {
 		const id = `slot-${this.nextId++}`;
+		const previousForeground = this._foregroundSlotId;
 		const gitWorktreeRoot = resolveGitWorktreeRoot(services.cwd);
 		const slot = new RuntimeSessionSlot(
 			id,
@@ -161,6 +174,20 @@ export class SessionPool {
 		);
 		this.slots.set(id, slot);
 		if (this._foregroundSlotId === undefined) this._foregroundSlotId = id;
+		try {
+			syncSessionRegistry({
+				id: session.sessionManager.getSessionId(),
+				file: session.sessionFile,
+				cwd: slot.cwd,
+				name: session.sessionManager.getSessionName(),
+			});
+		} catch (error) {
+			this.slots.delete(id);
+			this._foregroundSlotId = previousForeground;
+			slot.close();
+			this.updateConflicts();
+			throw error;
+		}
 		return slot;
 	}
 
@@ -170,6 +197,10 @@ export class SessionPool {
 
 	get(slotId: string): SessionSlot | undefined {
 		return this.slots.get(slotId);
+	}
+
+	findBySessionId(sessionId: string): SessionSlot | undefined {
+		return this.list().find((slot) => slot.session.sessionManager.getSessionId() === sessionId);
 	}
 
 	has(slotId: string): boolean {
@@ -214,10 +245,20 @@ export class SessionPool {
 	removeClosed(slotId: string): SessionSlot | undefined {
 		const slot = this.slots.get(slotId);
 		if (!slot) return undefined;
+		let cleanupError: unknown;
+		try {
+			if (this.failNextClose) {
+				this.failNextClose = false;
+				throw new Error(`Injected runtime cleanup failure for ${slot.session.sessionManager.getSessionId()}`);
+			}
+			slot.close();
+		} catch (error) {
+			cleanupError = error;
+		}
 		this.slots.delete(slotId);
 		if (this._foregroundSlotId === slotId) this._foregroundSlotId = undefined;
-		slot.close();
 		this.updateConflicts();
+		if (cleanupError) throw cleanupError;
 		return slot;
 	}
 }
