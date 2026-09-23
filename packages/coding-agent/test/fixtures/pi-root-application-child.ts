@@ -56,8 +56,8 @@ const createRuntime: CreateAgentSessionRuntimeFactory = async ({ cwd, sessionMan
 const application = await startPiRootApplication({
 	root,
 	agentDir,
-	sessionDir: join(root, "sessions"),
-	registryOptions: { heartbeatIntervalMs: 100, staleAfterMs: 300 },
+	sessionDir: join(root, ".pi", "sessions"),
+	registryOptions: { heartbeatIntervalMs: 100, staleAfterMs: 300, sessionDir: join(root, ".pi", "sessions") },
 	createRuntime,
 });
 const ready = {

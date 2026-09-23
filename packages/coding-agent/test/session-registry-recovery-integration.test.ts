@@ -16,7 +16,7 @@ function project(): { base: string; root: string; sessions: string; design: stri
 	mkdirSync(join(root, "control"), { recursive: true });
 	mkdirSync(design, { recursive: true });
 	mkdirSync(experiments, { recursive: true });
-	setPiRoot(root, "formal");
+	setPiRoot(root);
 	return { base, root, sessions, design, experiments };
 }
 
@@ -56,7 +56,7 @@ afterEach(() => setPiRoot(undefined));
 describe("SessionRegistry recovery integration", () => {
 	it("upgrades legacy control-role schema transactionally and reprojects authority roles", () => {
 		const value = project();
-		const control = durable(join(value.root, "control"), value.sessions, "legacy-control");
+		const control = durable(value.root, value.sessions, "legacy-controller");
 		const executor = durable(value.design, value.sessions, "legacy-executor");
 		const ordinary = durable(value.experiments, value.sessions, "legacy-ordinary");
 		mkdirSync(join(value.root, "control", "qualification", "tasks"), { recursive: true });
@@ -84,8 +84,8 @@ INSERT INTO meta VALUES('pi_root','${value.root}');`);
 		insert.run({
 			id: control.getSessionId(),
 			file: control.getSessionFile()!,
-			cwd: join(value.root, "control"),
-			name: "control",
+			cwd: value.root,
+			name: "controller",
 			role: "control",
 			state: "inactive",
 			instance: null,
@@ -209,7 +209,7 @@ INSERT INTO meta VALUES('pi_root','${value.root}');`);
 		metaDb.run({
 			id: "other-canonical",
 			file: join(value.sessions, "other.jsonl"),
-			cwd: join(value.root, "control"),
+			cwd: value.root,
 			name: "other",
 		});
 		metaDb.run({
@@ -275,9 +275,9 @@ INSERT INTO meta VALUES('pi_root','${value.root}');`);
 		rmSync(value.base, { recursive: true, force: true });
 	});
 
-	it("clean restart activates only canonical control and preserves ordinary identity", () => {
+	it("clean restart activates only canonical Controller and preserves ordinary identity", () => {
 		const value = project();
-		const control = durable(join(value.root, ".pi"), value.sessions, "control");
+		const control = durable(value.root, value.sessions, "controller");
 		const design = durable(value.design, value.sessions, "architecture");
 		const experiments = durable(value.experiments, value.sessions, "science");
 		const before = [info(control), info(design), info(experiments)];
@@ -316,9 +316,9 @@ INSERT INTO meta VALUES('pi_root','${value.root}');`);
 		rmSync(value.base, { recursive: true, force: true });
 	});
 
-	it("reclaims a stale instance and resumes only canonical control", () => {
+	it("reclaims a stale instance and resumes only the canonical Controller", () => {
 		const value = project();
-		const control = durable(join(value.root, ".pi"), value.sessions, "control");
+		const control = durable(value.root, value.sessions, "controller");
 		const design = durable(value.design, value.sessions, "architecture");
 		const rows = [info(control), info(design)];
 		const first = new SessionRegistry(value.root, { heartbeatIntervalMs: 100, staleAfterMs: 1 });
@@ -356,10 +356,10 @@ INSERT INTO meta VALUES('pi_root','${value.root}');`);
 		rmSync(value.base, { recursive: true, force: true });
 	});
 
-	it("rebuilds the deleted registry from JSONL identity and filters control history", async () => {
+	it("rebuilds the deleted registry from JSONL identity and filters ordinary history", async () => {
 		const value = project();
-		const oldControl = durable(join(value.root, ".pi"), value.sessions, "old-control");
-		const control = durable(join(value.root, ".pi"), value.sessions, "control");
+		const oldControl = durable(value.root, join(value.root, ".pi", "sessions"), "old-controller");
+		const control = durable(value.root, join(value.root, ".pi", "sessions"), "controller");
 		const design = durable(value.design, value.sessions, "architecture");
 		const experiments = durable(value.experiments, value.sessions, "science");
 		const rows = await SessionManager.listAll(value.sessions);

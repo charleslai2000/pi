@@ -80,7 +80,7 @@ function setup(): {
 	const taskDir = join(root, "control", "goal-a", "tasks");
 	mkdirSync(taskDir, { recursive: true });
 	writeFileSync(join(root, "control", "goal-a", "goal.md"), "# Goal A\n");
-	setPiRoot(root, "formal");
+	setPiRoot(root);
 	const registry = new SessionRegistry(root);
 	setSessionRegistryForTesting(registry);
 	const sessionDir = getDefaultSessionDir(root);

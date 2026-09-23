@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { canonicalizePath } from "../utils/paths.ts";
 import { readAssociations } from "./control/associations.ts";
-import { getPiRoot, getPiRootControlDir, getPiRootRuntimeDir, hasPiRootMarker } from "./pi-root.ts";
+import { getPiRootRuntimeDir, hasPiRootMarker } from "./pi-root.ts";
 import { type SessionInfo, SessionManager } from "./session-manager.ts";
 
 export type SessionRegistryRole = "controller" | "executor" | "unassigned";
@@ -267,7 +267,7 @@ VALUES(?,?,?,?,?,'inactive',NULL,?,?) ON CONFLICT(session_id) DO UPDATE SET sess
 					timestamp,
 				);
 			}
-			this.recoverCanonicalControl();
+			this.recoverCanonicalController();
 			this.db.exec("COMMIT");
 		} catch (error) {
 			this.db.exec("ROLLBACK");
@@ -275,20 +275,17 @@ VALUES(?,?,?,?,?,'inactive',NULL,?,?) ON CONFLICT(session_id) DO UPDATE SET sess
 		}
 	}
 
-	private recoverCanonicalControl(): void {
-		const controlDir = getPiRootControlDir(this.root);
-		if (!controlDir) return;
+	private recoverCanonicalController(): void {
 		const existing = this.db.prepare("SELECT value FROM meta WHERE key='canonical_control_session_id'").get() as
 			| { value?: string }
 			| undefined;
 		if (existing?.value && this.db.prepare("SELECT 1 FROM sessions WHERE session_id=?").get(existing.value)) return;
-		const candidate = this.db
-			.prepare("SELECT session_id FROM sessions WHERE cwd=? ORDER BY last_seen_at DESC, session_id ASC LIMIT 1")
-			.get(controlDir) as { session_id?: string } | undefined;
-		if (candidate?.session_id)
+		if (existing?.value) {
 			this.db
-				.prepare("INSERT OR REPLACE INTO meta(key,value) VALUES('canonical_control_session_id',?)")
-				.run(candidate.session_id);
+				.prepare("INSERT OR REPLACE INTO meta(key,value) VALUES('orphaned_canonical_control_session_id',?)")
+				.run(existing.value);
+			this.db.prepare("DELETE FROM meta WHERE key='canonical_control_session_id'").run();
+		}
 	}
 
 	getRoot(): string {
@@ -304,13 +301,11 @@ VALUES(?,?,?,?,?,'inactive',NULL,?,?) ON CONFLICT(session_id) DO UPDATE SET sess
 		return id === undefined ? undefined : this.rows().find((row) => row.session_id === id);
 	}
 
-	async openCanonicalControl(sessionDir?: string): Promise<SessionManager> {
+	async openCanonicalController(sessionDir?: string, cwd = this.root): Promise<SessionManager> {
 		const existing = this.canonicalControlSession();
 		if (existing && existsSync(existing.session_file ?? ""))
 			return SessionManager.open(existing.session_file!, sessionDir);
-		const controlDir = getPiRootControlDir(this.root);
-		if (!controlDir) throw new Error(`PiRoot has no control directory: ${this.root}`);
-		const created = SessionManager.create(controlDir, sessionDir);
+		const created = SessionManager.create(cwd, sessionDir);
 		if (created.getSessionFile() && !existsSync(created.getSessionFile()!)) created.persistSessionHeader();
 		this.setCanonicalControlSessionId(created.getSessionId());
 		return created;
@@ -337,6 +332,12 @@ VALUES(?,?,?,?,?,'inactive',NULL,?,?) ON CONFLICT(session_id) DO UPDATE SET sess
 				| undefined
 		)?.value;
 		if (stored && this.db.prepare("SELECT 1 FROM sessions WHERE session_id=?").get(stored)) return stored;
+		const orphaned = (
+			this.db.prepare("SELECT value FROM meta WHERE key='orphaned_canonical_control_session_id'").get() as
+				| { value?: string }
+				| undefined
+		)?.value;
+		if (orphaned && this.db.prepare("SELECT 1 FROM sessions WHERE session_id=?").get(orphaned)) return orphaned;
 		return undefined;
 	}
 	setCanonicalControlSessionId(id: string): void {
@@ -359,11 +360,7 @@ VALUES(?,?,?,?,?,'active',?,?,?) ON CONFLICT(session_id) DO UPDATE SET session_f
 				timestamp,
 				timestamp,
 			);
-		if (
-			this.roleFor(session.id, cwd) === "unassigned" &&
-			cwd === getPiRootControlDir(this.root) &&
-			!this.canonicalControlSessionId()
-		)
+		if (this.roleFor(session.id, cwd) === "unassigned" && !this.canonicalControlSessionId())
 			this.setCanonicalControlSessionId(session.id);
 	}
 	setName(id: string, name: string | undefined): void {
@@ -486,8 +483,4 @@ export function syncSessionRegistryName(id: string, name: string | undefined): v
 }
 export function deactivateSessionRegistry(id: string): void {
 	registry?.setInactive(id);
-}
-export function isControlCwd(cwd: string): boolean {
-	const root = getPiRoot();
-	return root !== undefined && getPiRootControlDir(root) === canonicalizePath(cwd);
 }

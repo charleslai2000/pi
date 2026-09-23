@@ -65,7 +65,7 @@ import {
 import { type AgentSession, type AgentSessionEvent, parseSkillBlock } from "../../core/agent-session.ts";
 import {
 	type AgentSessionRuntime,
-	ControlSessionAlreadyExistsError,
+	ControllerSessionAlreadyExistsError,
 	SessionImportFileNotFoundError,
 } from "../../core/agent-session-runtime.ts";
 import type { AgentSessionRuntimeDiagnostic } from "../../core/agent-session-services.ts";
@@ -6937,7 +6937,7 @@ export class InteractiveMode {
 			);
 			this.ui.requestRender();
 		} catch (error: unknown) {
-			if (error instanceof ControlSessionAlreadyExistsError) {
+			if (error instanceof ControllerSessionAlreadyExistsError) {
 				this.showWarning(error.message);
 				return;
 			}

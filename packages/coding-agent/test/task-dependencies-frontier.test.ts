@@ -18,7 +18,7 @@ function setup(): string {
 	roots.push(root);
 	mkdirSync(join(root, "control", "goal-a", "tasks"), { recursive: true });
 	writeFileSync(join(root, "control", "goal-a", "goal.md"), "# Goal A\n");
-	setPiRoot(root, "formal");
+	setPiRoot(root);
 	return root;
 }
 function task(root: string, id: string) {

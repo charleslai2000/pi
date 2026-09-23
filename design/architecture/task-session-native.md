@@ -31,7 +31,19 @@ A review PASS completes only the Review Task and never changes or reopens the or
 
 Status: ACCEPTED
 
-The formal PiRoot layout is `<PiRoot>/.pi/` for machine-owned runtime state and `<PiRoot>/control/` for versioned human-readable Goal/Plan/Task authority. Formal runtime no longer falls back to `control/`; existing legacy roots require an explicit, stopped-runtime migration of registry, assignments, and project session transcripts before activation.
+### PiRoot resolution policy
+
+Status: ACCEPTED
+
+`<PiRoot>/.pi/` is the sole marker for a PiRoot and contains Pi-owned machine state, including the session registry, assignments, and project session transcripts. The `control/` directory is not a root marker, is not required to launch Pi, and is never a fallback location for runtime state. Goal/Plan/Task Markdown under `control/` is optional Task authority associated with a PiRoot, not a prerequisite for ordinary Pi use.
+
+Resolution is deterministic: explicit `--root` wins and must name an existing directory containing `.pi/`; otherwise walk upward from the startup cwd and select the nearest ancestor containing `.pi/`. If none exists, CLI startup fails with guidance to create/use a PiRoot or pass `--root`. SDK/embedded callers may leave PiRoot unset. Never infer PiRoot from Git roots, `control/`, arbitrary project files, or session cwd after startup.
+
+A PiRoot with no `control/` remains a valid ordinary Pi project. Control Plane operations requiring Goal/Task authority report that authority as unavailable; they do not create it implicitly. A new canonical Controller is created in `<PiRoot>/.pi/sessions/`, and its identity is held in registry metadata. If the registry database is lost, prior canonical identity is not safely inferable from transcripts: startup preserves the old transcript and creates a new Controller rather than guessing. Existing legacy Control Plane data requires an explicit, stopped-runtime migration before being used.
+
+### Session-native runtime semantics
+
+The formal runtime uses `.pi/` and does not fall back to legacy runtime locations.
 
 Each PiRoot has exactly one canonical Controller identified by `canonical_control_session_id`. Logical Session role is derived from authority: `controller` for that Session ID, `executor` for a current assignment, and `unassigned` otherwise. A Session matching both Controller and Executor is an invariant violation. UI slots are presentation identities only.
 

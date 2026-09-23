@@ -1,5 +1,5 @@
 import { type ChildProcess, spawn } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
 import { DatabaseSync } from "node:sqlite";
@@ -37,7 +37,7 @@ function db(root: string): DatabaseSync {
 function persistedSession(root: string, cwdName: string): string {
 	const cwd = join(root, cwdName);
 	mkdirSync(cwd, { recursive: true });
-	const manager = SessionManager.create(cwd, join(root, "sessions"));
+	const manager = SessionManager.create(cwd, join(root, ".pi", "sessions"));
 	manager.persistSessionHeader();
 	return manager.getSessionFile()!;
 }
@@ -238,7 +238,7 @@ describe("PiRoot application cross-process lifecycle", () => {
 		rmSync(project.base, { recursive: true, force: true });
 	});
 
-	it("rebuilds the catalog after database deletion and activates only control", async () => {
+	it("rebuilds the catalog after database deletion and creates a new canonical Controller", async () => {
 		const project = makeProject();
 		const designFile = persistedSession(project.root, "design");
 		const experimentsFile = persistedSession(project.root, "experiments");
@@ -250,8 +250,9 @@ describe("PiRoot application cross-process lifecycle", () => {
 		expect(await commandAndExit(first.child, "shutdown")).toBe(0);
 		for (const suffix of ["", "-wal", "-shm"]) rmSync(join(controlDir, `control.sqlite3${suffix}`), { force: true });
 		const second = await start(project);
-		expect(second.ready.canonicalSessionId).toBe(original.id);
-		expect(second.ready.sessionFile).toBe(original.file);
+		expect(second.ready.canonicalSessionId).not.toBe(original.id);
+		expect(second.ready.sessionFile).not.toBe(original.file);
+		expect(existsSync(original.file!)).toBe(true);
 		expect(second.ready.poolSize).toBe(1);
 		const rebuilt = db(project.root);
 		const rows = rebuilt
@@ -264,7 +265,9 @@ describe("PiRoot application cross-process lifecycle", () => {
 		}>;
 		expect(rows.some((row) => row.session_file === designFile && row.runtime_state === "inactive")).toBe(true);
 		expect(rows.some((row) => row.session_file === experimentsFile && row.runtime_state === "inactive")).toBe(true);
-		expect(rows.find((row) => row.session_id === original.id)?.runtime_instance_id).toBe(second.ready.instanceId);
+		expect(rows.find((row) => row.session_id === second.ready.canonicalSessionId)?.runtime_instance_id).toBe(
+			second.ready.instanceId,
+		);
 		rebuilt.close();
 		expect(await commandAndExit(second.child, "shutdown")).toBe(0);
 		rmSync(project.base, { recursive: true, force: true });

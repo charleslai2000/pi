@@ -27,7 +27,7 @@ function fixture(): { root: string; sessionId: string } {
 	writeFileSync(join(root, "control", "warm-multi-session", "goal.md"), "# Warm\n");
 	writeFileSync(join(taskDir, "T001-work.md"), "Status: READY\n");
 	const sessionId = "session-a";
-	setPiRoot(root, "formal");
+	setPiRoot(root);
 	const sessionDir = getDefaultSessionDir(root);
 	writeFileSync(
 		join(sessionDir, "session-a.jsonl"),
@@ -293,7 +293,7 @@ describe("durable task/session associations", () => {
 		const root = mkdtempSync(join("/tmp", "pi-associations-no-control-"));
 		mkdirSync(join(root, ".pi"), { recursive: true });
 		mkdirSync(join(root, "control"), { recursive: true });
-		setPiRoot(root, "formal");
+		setPiRoot(root);
 		const taskDir = join(root, "control", "goal-a", "tasks");
 		mkdirSync(taskDir, { recursive: true });
 		writeFileSync(join(root, "control", "goal-a", "goal.md"), "# Goal A\n");

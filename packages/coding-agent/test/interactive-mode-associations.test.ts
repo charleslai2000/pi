@@ -18,7 +18,7 @@ function makeFixture(): { root: string; sessionDir: string; d1: string; d2: stri
 	writeFileSync(join(control, "goal-a", "goal.md"), "# Goal A\n");
 	writeFileSync(join(taskDir, "T001-work.md"), "Status: READY\n");
 	writeFileSync(join(taskDir, "T002-work.md"), "Status: READY\n");
-	setPiRoot(root, "formal");
+	setPiRoot(root);
 	const sessionDir = getDefaultSessionDir(root);
 	const d1 = "d1-session";
 	const d2 = "d2-session";
@@ -207,7 +207,7 @@ describe("InteractiveMode association commands", () => {
 		setSessionRegistryForTesting(undefined);
 		setPiRoot(undefined);
 
-		setPiRoot(value.root, "formal");
+		setPiRoot(value.root);
 		const registryB = new SessionRegistry(value.root, { acquire: false });
 		registryB.rebuild([
 			{

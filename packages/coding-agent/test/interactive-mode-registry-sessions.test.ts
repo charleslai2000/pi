@@ -17,7 +17,7 @@ function make(): { root: string; registry: SessionRegistry; pool: SessionPool } 
 	mkdirSync(join(root, ".pi"), { recursive: true });
 	mkdirSync(join(root, "control"), { recursive: true });
 	mkdirSync(join(root, "design"), { recursive: true });
-	setPiRoot(root, "formal");
+	setPiRoot(root);
 	const registry = new SessionRegistry(root);
 	setSessionRegistryForTesting(registry);
 	return { root, registry, pool: new SessionPool() };

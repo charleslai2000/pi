@@ -76,7 +76,7 @@ describe("PiRoot application startup", () => {
 		});
 		expect(application.poolSize).toBe(1);
 		expect(application.foregroundSessionId).toBe(application.canonicalControlSessionId);
-		expect(application.foregroundCwd).toBe(join(root, "control"));
+		expect(application.foregroundCwd).toBe(root);
 		expect(application.registry.activeRows().map((row) => row.session_id)).toEqual([
 			application.canonicalControlSessionId,
 		]);

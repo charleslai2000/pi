@@ -26,7 +26,7 @@ function fixture(): { root: string; sessionDir: string; sessionId: string } {
 	mkdirSync(join(root, "control", "goal-c", "tasks"), { recursive: true });
 	writeFileSync(join(root, "control", "goal-c", "goal.md"), "# Goal C\n");
 	writeFileSync(join(root, "control", "goal-c", "tasks", "T002-work.md"), "Status: READY\n");
-	setPiRoot(root, "formal");
+	setPiRoot(root);
 	const sessionId = "d1";
 	const sessionDir = getDefaultSessionDir(root);
 	const cwd = join(root, "design");

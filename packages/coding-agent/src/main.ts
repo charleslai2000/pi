@@ -654,21 +654,19 @@ export async function main(args: string[], options?: MainOptions) {
 	// Resolve PiRoot before any session manager is created: it fixes the session
 	// history namespace and the boundary for `/new <path>` for the whole process.
 	// `--root` is authoritative when given; otherwise the nearest ancestor with a
-	// `control/` directory is used. Without a marker, PiRoot stays unset so
+	// `.pi/` directory is used. Without a marker, PiRoot stays unset so
 	// SDK/embedded behavior is unchanged.
 	let piRoot: string | undefined;
-	let piRootMode: "formal" | "legacy" | undefined;
 	try {
 		const resolved = resolvePiRootInfo({ explicitRoot: parsed.root, cwd });
 		piRoot = resolved.root;
-		piRootMode = resolved.mode;
 	} catch (error: unknown) {
 		// Always surface PiRoot resolution failures: the CLI must not start
 		// without a known PiRoot when one is required.
 		console.error(chalk.red(`Error: ${error instanceof Error ? error.message : String(error)}`));
 		process.exit(1);
 	}
-	setPiRoot(piRoot, piRootMode);
+	setPiRoot(piRoot);
 	const sessionRegistry = await initializeSessionRegistry(piRoot!);
 	process.once("exit", () => sessionRegistry.close());
 
@@ -701,7 +699,7 @@ export async function main(args: string[], options?: MainOptions) {
 		(envSessionDir ? expandTildePath(envSessionDir) : undefined) ??
 		startupSettingsManager.getSessionDir();
 	let sessionManager = piRoot
-		? await sessionRegistry.openCanonicalControl(sessionDir)
+		? await sessionRegistry.openCanonicalController(sessionDir, piRoot!)
 		: await createSessionManager(parsed, cwd, sessionDir, startupSettingsManager);
 	const missingSessionCwdIssue = getMissingSessionCwdIssue(sessionManager, cwd);
 	if (missingSessionCwdIssue) {

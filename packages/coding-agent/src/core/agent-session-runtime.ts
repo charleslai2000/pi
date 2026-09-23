@@ -40,12 +40,7 @@ import type {
 	SessionStartEvent,
 } from "./extensions/index.ts";
 import { emitSessionShutdownEvent } from "./extensions/runner.ts";
-import {
-	assertCwdInsidePiRoot,
-	assertSessionCwdInsidePiRoot,
-	getPiRootControlCwd,
-	getPiRootRuntimeDir,
-} from "./pi-root.ts";
+import { assertCwdInsidePiRoot, assertSessionCwdInsidePiRoot, getPiRoot, getPiRootRuntimeDir } from "./pi-root.ts";
 import type { CreateAgentSessionResult } from "./sdk.ts";
 import { assertSessionCwdExists } from "./session-cwd.ts";
 import { SessionManager } from "./session-manager.ts";
@@ -175,10 +170,10 @@ export type CreateAgentSessionRuntimeFactory = (options: {
 /**
  * Thrown when /import references a JSONL file path that does not exist.
  */
-export class ControlSessionAlreadyExistsError extends Error {
+export class ControllerSessionAlreadyExistsError extends Error {
 	constructor() {
 		super("The control session already exists. Switch to it with /sessions.");
-		this.name = "ControlSessionAlreadyExistsError";
+		this.name = "ControllerSessionAlreadyExistsError";
 	}
 }
 
@@ -1217,9 +1212,8 @@ export class AgentSessionRuntime {
 		cwd?: string;
 	}): Promise<{ result: CreateAgentSessionRuntimeResult; sessionManager: SessionManager }> {
 		const targetCwd = options?.cwd ? resolvePath(options.cwd) : this.cwd;
-		const controlCwd = getPiRootControlCwd();
-		if (controlCwd === targetCwd) {
-			throw new ControlSessionAlreadyExistsError();
+		if (targetCwd === getPiRoot()) {
+			throw new ControllerSessionAlreadyExistsError();
 		}
 		// Defense-in-depth: SessionManager.create also enforces this.
 		assertCwdInsidePiRoot(targetCwd);

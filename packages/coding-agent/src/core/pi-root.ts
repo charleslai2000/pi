@@ -8,7 +8,7 @@
  *   - the current foreground session cwd
  *   - `git rev-parse --show-toplevel` (a PiRoot may or may not be a Git repo)
  *
- * A directory qualifies as a PiRoot when it contains `.pi/` runtime state. Task authority under `control/` is optional.
+ * A directory qualifies as a PiRoot when it contains the `.pi/` runtime directory.
  */
 
 import { existsSync, realpathSync, statSync } from "node:fs";
@@ -16,7 +16,6 @@ import { dirname, isAbsolute, join, resolve as nodeResolvePath, relative, sep } 
 
 /** Marker directory that identifies a PiRoot. */
 export const PI_ROOT_MARKER = ".pi";
-export const PI_ROOT_CONTROL_DIR = "control";
 
 /** Thrown when PiRoot cannot be resolved. */
 export class PiRootNotFoundError extends Error {
@@ -47,16 +46,11 @@ export class PiRootPathError extends Error {
 	}
 }
 
-export type PiRootMode = "formal";
-
 export interface PiRootResolution {
 	root: string;
-	controlDir: string;
-	mode: PiRootMode;
 }
 
 let activePiRoot: string | undefined;
-let activePiRootMode: PiRootMode | undefined;
 
 /** The fixed PiRoot for this process, if resolved. */
 export function hasFormalPiRootMarker(root: string): boolean {
@@ -68,13 +62,8 @@ export function getPiRoot(): string | undefined {
 }
 
 /** Set the process-level PiRoot. Passing `undefined` clears it. */
-export function setPiRoot(root: string | undefined, _mode?: PiRootMode): void {
+export function setPiRoot(root: string | undefined): void {
 	activePiRoot = root === undefined ? undefined : canonicalizePath(root);
-	activePiRootMode = root === undefined ? undefined : "formal";
-}
-
-export function getPiRootMode(): PiRootMode | undefined {
-	return activePiRootMode;
 }
 
 function canonicalizePath(path: string): string {
@@ -118,11 +107,6 @@ export function hasPiRootMarker(dir: string): boolean {
 	return isDirectory(join(dir, PI_ROOT_MARKER));
 }
 
-/** True when `dir` contains the human-readable Task authority directory. */
-export function hasControlDirectory(dir: string): boolean {
-	return isDirectory(join(dir, PI_ROOT_CONTROL_DIR));
-}
-
 /**
  * Walk from `startCwd` toward the filesystem root and return the nearest
  * ancestor containing `.pi/`.
@@ -149,7 +133,7 @@ export function resolvePiRootInfo(options: { explicitRoot?: string; cwd: string 
 	const explicit = options.explicitRoot !== undefined && options.explicitRoot !== "";
 	const root = explicit ? canonicalizeAllowMissing(options.explicitRoot!) : findPiRootFromCwd(options.cwd);
 	if (root !== undefined && hasPiRootMarker(root)) {
-		return { root, controlDir: canonicalizePath(join(root, PI_ROOT_CONTROL_DIR)), mode: "formal" };
+		return { root };
 	}
 	throw new PiRootNotFoundError(explicit ? { explicitRoot: options.explicitRoot } : { searchedFrom: options.cwd });
 }
@@ -219,12 +203,6 @@ export function resolvePiRootRelativePath(input: string, root: string | undefine
 	return canonicalTarget;
 }
 
-/** Derive a short display label for a path relative to PiRoot. */
-export function getPiRootControlCwd(root: string | undefined = activePiRoot): string | undefined {
-	if (root === undefined) return undefined;
-	return canonicalizePath(join(root, PI_ROOT_CONTROL_DIR));
-}
-
 export function getPiRootRuntimeDir(root: string | undefined = activePiRoot): string | undefined {
 	if (root === undefined) return undefined;
 	return canonicalizePath(join(root, PI_ROOT_MARKER));
@@ -248,7 +226,8 @@ export function assertManagedControlMutationAllowed(target: string): void {
 }
 
 export function getPiRootControlDir(root: string | undefined = activePiRoot): string | undefined {
-	return getPiRootControlCwd(root);
+	if (root === undefined) return undefined;
+	return canonicalizeAllowMissing(join(root, "control"));
 }
 
 export function formatPiRootRelativePath(target: string, root: string | undefined = activePiRoot): string {

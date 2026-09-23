@@ -13,7 +13,6 @@ import { readExecutionAttempts } from "../src/core/control/execution-attempts.ts
 import { readTask } from "../src/core/control/read-model.ts";
 import { completeTask } from "../src/core/control/task-mutations.ts";
 import { setPiRoot } from "../src/core/pi-root.ts";
-import { getDefaultSessionDir } from "../src/core/session-manager.ts";
 import { SessionRegistry, setSessionRegistryForTesting } from "../src/core/session-registry.ts";
 
 function fixture(status = "READY"): {
@@ -29,16 +28,23 @@ function fixture(status = "READY"): {
 	const taskPath = join(taskDir, "T001-work.md");
 	writeFileSync(join(root, "control", "goal-a", "goal.md"), "# Goal A\n");
 	writeFileSync(taskPath, `Status: ${status}\nObjective: test native lifecycle\nResult: old\nRemaining: later\n`);
-	setPiRoot(root, "formal");
+	setPiRoot(root);
 	const registry = new SessionRegistry(root);
 	setSessionRegistryForTesting(registry);
 	const session = new FakeSession();
-	const sessionFile = join(getDefaultSessionDir(root), "s1.jsonl");
-	mkdirSync(getDefaultSessionDir(root), { recursive: true });
+	const sessionFile = join(root, ".pi", "sessions", "s1.jsonl");
+	mkdirSync(join(root, ".pi", "sessions"), { recursive: true });
 	writeFileSync(
 		sessionFile,
 		`${JSON.stringify({ type: "session", version: 3, id: "s1", timestamp: new Date().toISOString(), cwd: root })}\n`,
 	);
+	const controllerFile = join(root, ".pi", "sessions", "controller.jsonl");
+	writeFileSync(
+		controllerFile,
+		`${JSON.stringify({ type: "session", version: 3, id: "controller", timestamp: new Date().toISOString(), cwd: root })}\n`,
+	);
+	registry.upsert({ id: "controller", file: controllerFile, cwd: root, name: "Controller" });
+	registry.setCanonicalControlSessionId("controller");
 	registry.upsert({ id: "s1", file: sessionFile, cwd: root, name: "S1" });
 	const pool = {
 		findBySessionId: (id: string) => (id === "s1" ? { session } : undefined),

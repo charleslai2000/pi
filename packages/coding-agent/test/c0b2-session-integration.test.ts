@@ -10,7 +10,7 @@ function state(): { root: string; registry: SessionRegistry; pool: SessionPool }
 	const root = join(base, "project");
 	mkdirSync(join(root, ".pi"), { recursive: true });
 	mkdirSync(join(root, "control"), { recursive: true });
-	setPiRoot(root, "formal");
+	setPiRoot(root);
 	const registry = new SessionRegistry(root);
 	setSessionRegistryForTesting(registry);
 	return { root, registry, pool: new SessionPool() };

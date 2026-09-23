@@ -13,7 +13,7 @@ function fixture(status = "ACTIVE"): { root: string; taskPath: string } {
 		taskPath,
 		`Status: ${status}\nObjective: preserve this\nResult: old\nRemaining: later\n\nOther: content\n`,
 	);
-	setPiRoot(root, "formal");
+	setPiRoot(root);
 	return { root, taskPath };
 }
 

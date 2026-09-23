@@ -17,7 +17,7 @@ describe("SessionRegistry ownership", () => {
 
 	it("rejects a fresh second owner without changing the first owner", () => {
 		const root = project();
-		setPiRoot(root, "formal");
+		setPiRoot(root);
 		const first = new SessionRegistry(root);
 		const instance = first.runtimeInstance();
 		expect(() => new SessionRegistry(root)).toThrow(PiRootAlreadyActiveError);
@@ -28,7 +28,7 @@ describe("SessionRegistry ownership", () => {
 
 	it("does not release ownership on repeated same-root initialize semantics", () => {
 		const root = project();
-		setPiRoot(root, "formal");
+		setPiRoot(root);
 		const first = new SessionRegistry(root);
 		const second = first;
 		expect(second).toBe(first);
@@ -38,7 +38,7 @@ describe("SessionRegistry ownership", () => {
 
 	it("closes the instance and its active rows", () => {
 		const root = project();
-		setPiRoot(root, "formal");
+		setPiRoot(root);
 		const registry = new SessionRegistry(root);
 		registry.upsert({ id: "control-1", cwd: join(root, ".pi"), name: "control" });
 		registry.close();

@@ -27,7 +27,7 @@ export async function startPiRootApplication(options: {
 	createRuntime: CreateAgentSessionRuntimeFactory;
 }): Promise<PiRootApplication> {
 	const info = resolvePiRootInfo({ explicitRoot: options.root, cwd: options.root });
-	setPiRoot(info.root, info.mode);
+	setPiRoot(info.root);
 	const runtimeDir = getPiRootRuntimeDir(info.root);
 	if (!runtimeDir) throw new Error(`PiRoot has no runtime directory: ${info.root}`);
 	const sessionDir = options.sessionDir ?? join(runtimeDir, "sessions");
@@ -35,7 +35,7 @@ export async function startPiRootApplication(options: {
 		...options.registryOptions,
 		sessionDir,
 	});
-	const sessionManager = await registry.openCanonicalControl(sessionDir);
+	const sessionManager = await registry.openCanonicalController(sessionDir, info.root);
 	const runtimeHost = await createAgentSessionRuntime(options.createRuntime, {
 		cwd: sessionManager.getCwd(),
 		agentDir: options.agentDir,

@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { getPiRootControlDir, resolvePiRootInfo, setPiRoot } from "../src/core/pi-root.ts";
+import { resolvePiRootInfo, setPiRoot } from "../src/core/pi-root.ts";
 import { SessionRegistry } from "../src/core/session-registry.ts";
 
 function session(
@@ -48,20 +48,17 @@ describe("SessionRegistry control plane", () => {
 		const base = mkdtempSync(join("/tmp", "pi-registry-formal-"));
 		const root = join(base, "project");
 		mkdirSync(join(root, ".pi"), { recursive: true });
-		mkdirSync(join(root, "control"), { recursive: true });
 		const design = join(root, "design");
 		const experiments = join(root, "experiments");
 		mkdirSync(design, { recursive: true });
 		mkdirSync(experiments, { recursive: true });
-		setPiRoot(root, "formal");
-		expect(resolvePiRootInfo({ cwd: design })).toEqual({ root, controlDir: join(root, "control"), mode: "formal" });
-		expect(getPiRootControlDir(root)).toBe(join(root, "control"));
-
+		setPiRoot(root);
+		expect(resolvePiRootInfo({ cwd: design })).toEqual({ root });
 		const registry = new SessionRegistry(root);
 		const rows = [
 			session("a", design, "design"),
 			session("b", experiments, "science"),
-			session("c", join(root, ".pi"), "control"),
+			session("c", join(root, ".pi"), "runtime"),
 		];
 		registry.rebuild(rows);
 		const first = logicalRows(registry);
@@ -85,21 +82,19 @@ describe("SessionRegistry control plane", () => {
 		const base = mkdtempSync(join("/tmp", "pi-registry-no-control-"));
 		const root = join(base, "project");
 		mkdirSync(join(root, ".pi"), { recursive: true });
-		setPiRoot(root, "formal");
+		setPiRoot(root);
 		const registry = new SessionRegistry(root, { acquire: false });
 		expect(registry.getRoot()).toBe(root);
 		registry.close();
 		rmSync(base, { recursive: true, force: true });
 	});
 
-	it("rejects a directory with control/ but no .pi/ marker", () => {
-		const base = mkdtempSync(join("/tmp", "pi-registry-legacy-"));
+	it("does not treat control/ as a PiRoot marker", () => {
+		const base = mkdtempSync(join("/tmp", "pi-registry-no-marker-"));
 		const root = join(base, "project");
 		const control = join(root, "control");
 		mkdirSync(control, { recursive: true });
-		setPiRoot(root, "formal");
 		expect(() => resolvePiRootInfo({ cwd: control })).toThrow();
-		expect(() => new SessionRegistry(root)).toThrow();
 		rmSync(base, { recursive: true, force: true });
 	});
 
@@ -107,8 +102,7 @@ describe("SessionRegistry control plane", () => {
 		const base = mkdtempSync(join("/tmp", "pi-registry-crash-"));
 		const root = join(base, "project");
 		mkdirSync(join(root, ".pi"), { recursive: true });
-		mkdirSync(join(root, "control"), { recursive: true });
-		setPiRoot(root, "formal");
+		setPiRoot(root);
 		const registry = new SessionRegistry(root);
 		const a = session("a", join(root, "a"), "a");
 		registry.rebuild([a]);

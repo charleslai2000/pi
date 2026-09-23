@@ -56,7 +56,7 @@ function controlDirectory(piRoot: string): string {
 	const root = canonical(piRoot);
 	const resolved = getPiRootControlDir(root);
 	if (!resolved || !existsSync(resolved) || !statSync(resolved).isDirectory())
-		throw new ControlReadError(`PiRoot has no control directory: ${root}`);
+		throw new ControlReadError(`Task authority directory is unavailable for PiRoot: ${root}`);
 	return canonical(resolved);
 }
 

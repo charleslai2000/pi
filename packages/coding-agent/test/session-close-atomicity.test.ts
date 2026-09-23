@@ -15,7 +15,7 @@ function setup(): {
 	const base = mkdtempSync(join("/tmp", "pi-close-atomicity-"));
 	const root = join(base, "project");
 	mkdirSync(join(root, ".pi"), { recursive: true });
-	setPiRoot(root, "formal");
+	setPiRoot(root);
 	const registry = new SessionRegistry(root);
 	const id = "d1";
 	const session = {

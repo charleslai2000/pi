@@ -34,7 +34,6 @@ function makeDir(...segments: string[]): string {
 function makePiRoot(base: string, name: string): string {
 	const root = makeDir(base, name);
 	mkdirSync(join(root, ".pi"), { recursive: true });
-	mkdirSync(join(root, "control"), { recursive: true });
 	return root;
 }
 
@@ -85,9 +84,10 @@ describe("PiRoot resolution", () => {
 		expect(resolvePiRoot({ cwd: root })).toBe(root);
 	});
 
-	it("resolves from the control directory itself", () => {
+	it("resolves from a nested directory without Task authority", () => {
 		const root = makePiRoot(base, "project");
-		expect(resolvePiRoot({ cwd: join(root, "control") })).toBe(root);
+		const nested = makeDir(root, "work");
+		expect(resolvePiRoot({ cwd: nested })).toBe(root);
 	});
 
 	it("honors an explicit --root", () => {
@@ -98,7 +98,6 @@ describe("PiRoot resolution", () => {
 
 	it("rejects an explicit --root without .pi/", () => {
 		const plain = makeDir(base, "plain");
-		mkdirSync(join(plain, "control"));
 		expect(() => resolvePiRoot({ explicitRoot: plain, cwd: base })).toThrow(PiRootNotFoundError);
 	});
 
@@ -375,6 +374,7 @@ describe("cwd ancestry context", () => {
 
 	it("loads only the PiRoot and cwd ancestry for a design session", () => {
 		writeFileSync(join(root, "AGENTS.md"), "piroot-root");
+		mkdirSync(join(root, "control"), { recursive: true });
 		writeFileSync(join(root, "control", "AGENTS.md"), "control");
 		const design = makeDir(root, "design");
 		writeFileSync(join(design, "AGENTS.md"), "design");
@@ -385,6 +385,7 @@ describe("cwd ancestry context", () => {
 
 	it("loads control/AGENTS.md only when cwd is inside control", () => {
 		writeFileSync(join(root, "AGENTS.md"), "piroot-root");
+		mkdirSync(join(root, "control"), { recursive: true });
 		writeFileSync(join(root, "control", "AGENTS.md"), "control");
 
 		const files = loadProjectContextFiles({ cwd: join(root, "control"), agentDir });
@@ -393,6 +394,7 @@ describe("cwd ancestry context", () => {
 	});
 
 	it("dedupes by canonical path across a symlinked cwd alias", () => {
+		mkdirSync(join(root, "control"), { recursive: true });
 		writeFileSync(join(root, "control", "AGENTS.md"), "control");
 		const design = makeDir(root, "design");
 		writeFileSync(join(design, "AGENTS.md"), "design");
@@ -407,6 +409,7 @@ describe("cwd ancestry context", () => {
 
 	it("does not change ResourceLoader cwd semantics (only context assembly)", () => {
 		// Sanity: cwd stays the real session cwd, never the PiRoot.
+		mkdirSync(join(root, "control"), { recursive: true });
 		writeFileSync(join(root, "control", "AGENTS.md"), "control");
 		const design = makeDir(root, "design");
 		writeFileSync(join(design, "AGENTS.md"), "design");
