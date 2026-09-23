@@ -7,7 +7,7 @@
 - No current `task_result` protocol references remain in runtime source/tests/design.
 
 ## Decisive frontier
-Pi Control Plane runtime semantics and implementation/recovery are closed. OpenCodeX live service verification remains blocked by its external compiled routing preset mismatch; see `control/opencodex-formal-pi-root-migration/plan.md`. No Pi-side implementation dependency remains.
+Pi Control Plane runtime semantics and implementation/recovery are closed. OpenCodeX live migration verification is `BLOCKED BY EXTERNAL DEPENDENCY`, per user decision: OpenCodeX has one service/PID/listener on 3456, and Pi/Control Plane uses that existing service without a separate port. Do not use 3457, `opencodex-v11.service`, or a second instance; see `control/opencodex-formal-pi-root-migration/plan.md`. No Pi-side implementation dependency remains.
 
 ## Active tasks
 - None for Pi Control Plane implementation. OpenCodeX-owned live startup and any authorized GPT-6 continuation scope remain external.
