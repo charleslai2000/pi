@@ -35,7 +35,7 @@ import {
 	createCompactionSummaryMessage,
 	createCustomMessage,
 } from "./messages.ts";
-import { getPiRoot, isPathInsidePiRoot, PiRootPathError } from "./pi-root.ts";
+import { getPiRoot, getPiRootRuntimeDir, isPathInsidePiRoot, PiRootPathError } from "./pi-root.ts";
 export const CURRENT_SESSION_VERSION = 3;
 
 export interface SessionHeader {
@@ -513,47 +513,6 @@ function getDefaultSessionDirPath(cwd: string, agentDir: string = getDefaultAgen
 	return join(resolvedAgentDir, "sessions", safePath);
 }
 
-/**
- * Encode a path into the legacy per-cwd session directory name.
- */
-function encodeSessionDirName(path: string): string {
-	return `--${resolvePath(path)
-		.replace(/^[/\\]/, "")
-		.replace(/[/\\:]/g, "-")}--`;
-}
-
-/**
- * Candidate legacy per-cwd session directories that may hold sessions inside
- * `piRoot`.
- *
- * The directory-name encoding is lossy (`/` and `:` both become `-`), so
- * membership cannot be decided from the name alone. It is prefix-preserving,
- * though: every directory encoding a path inside `piRoot` starts with the
- * encoding of `piRoot`. That makes this a sound superset. Each session's
- * recorded cwd remains the authoritative filter, so over-inclusion here only
- * costs a header read and never leaks a session from another project.
- */
-function getLegacyPiRootSessionDirs(piRoot: string, agentDir: string = getDefaultAgentDir()): string[] {
-	const resolvedAgentDir = resolvePath(agentDir);
-	const sessionsDir = join(resolvedAgentDir, "sessions");
-	let entries: string[];
-	try {
-		entries = readdirSync(sessionsDir);
-	} catch {
-		return [];
-	}
-	const encodedPrefix = encodeSessionDirName(piRoot).slice(0, -2);
-	const namespaceDir = getDefaultSessionDirPath(piRoot, resolvedAgentDir);
-	const dirs: string[] = [];
-	for (const entry of entries) {
-		if (!entry.startsWith("--") || !entry.endsWith("--")) continue;
-		if (!entry.startsWith(encodedPrefix)) continue;
-		const dir = join(sessionsDir, entry);
-		if (dir !== namespaceDir) dirs.push(dir);
-	}
-	return dirs;
-}
-
 export function getDefaultSessionDir(cwd: string, agentDir: string = getDefaultAgentDir()): string {
 	const sessionDir = getDefaultSessionDirPath(cwd, agentDir);
 	if (!existsSync(sessionDir)) {
@@ -879,7 +838,12 @@ async function mapWithConcurrency<T, R>(
 }
 
 function sortSessionInfos(sessions: SessionInfo[]): SessionInfo[] {
-	return sessions.sort((a, b) => b.modified.getTime() - a.modified.getTime());
+	return sessions.sort(
+		(a, b) =>
+			b.modified.getTime() - a.modified.getTime() ||
+			basename(b.path).localeCompare(basename(a.path)) ||
+			a.path.localeCompare(b.path),
+	);
 }
 
 function buildSessionInfosWithConcurrency(
@@ -1683,73 +1647,12 @@ export class SessionManager {
 	}
 
 	/**
-	 * Create a managed continuation of a session stored in a legacy per-cwd
-	 * directory inside the current PiRoot.
-	 *
-	 * Legacy per-cwd directories remain a discovery source only: they are read
-	 * to preserve history, but new content must go to the PiRoot history
-	 * namespace. This writes a new session file in the namespace whose header
-	 * keeps `cwd` and records the legacy file as `parentSession`, then copies
-	 * every entry so context and lineage survive.
-	 *
-	 * The legacy file itself is never modified or appended to.
-	 *
-	 * @returns The new session file path, or undefined when no migration applies.
-	 */
-	private static migrateLegacySession(
-		sourcePath: string,
-		sourceHeader: SessionHeader | null,
-		sourceEntries: FileEntry[] | undefined,
-		resolvedCwd: string,
-	): string | undefined {
-		const piRoot = getPiRoot();
-		if (!piRoot) return undefined;
-
-		const namespaceDir = normalizePath(getDefaultSessionDirPath(piRoot));
-		const sourceDir = normalizePath(resolve(sourcePath, ".."));
-		if (sourceDir === namespaceDir) return undefined;
-
-		// Only migrate legacy directories that belong to this PiRoot.
-		const legacyDirs = getLegacyPiRootSessionDirs(piRoot).map((d) => normalizePath(d));
-		if (!legacyDirs.includes(sourceDir)) return undefined;
-
-		const entries = sourceEntries ?? loadEntriesFromFile(sourcePath);
-		const header = sourceHeader ?? (entries[0]?.type === "session" ? entries[0] : null);
-		if (!header) return undefined;
-
-		if (!existsSync(namespaceDir)) mkdirSync(namespaceDir, { recursive: true });
-
-		const newSessionId = createSessionId();
-		const timestamp = new Date().toISOString();
-		const fileTimestamp = timestamp.replace(/[:.]/g, "-");
-		const newSessionFile = join(namespaceDir, `${fileTimestamp}_${newSessionId}.jsonl`);
-
-		const newHeader: SessionHeader = {
-			...header,
-			version: CURRENT_SESSION_VERSION,
-			id: newSessionId,
-			timestamp,
-			cwd: resolvedCwd,
-			parentSession: sourcePath,
-		};
-		writeFileSync(newSessionFile, `${JSON.stringify(newHeader)}\n`, { flag: "wx" });
-		for (const entry of entries) {
-			if (entry.type !== "session") {
-				appendFileSync(newSessionFile, `${JSON.stringify(entry)}\n`);
-			}
-		}
-		return newSessionFile;
-	}
-
-	/**
 	 * Open a specific session file.
 	 *
 	 * When PiRoot is set, validates that the session's recorded cwd
 	 * is inside PiRoot. Rejects sessions from outside the boundary.
 	 *
-	 * Sessions discovered in a legacy per-cwd directory inside PiRoot are
-	 * migrated to the PiRoot history namespace so the legacy file is never
-	 * appended to again.
+	 * Explicit paths are opened in place; discovery uses the configured PiRoot namespace.
 	 *
 	 * @param path Path to session file
 	 * @param sessionDir Optional session directory for /new or /branch. If omitted, derives from file's parent.
@@ -1779,14 +1682,6 @@ export class SessionManager {
 			throw new PiRootPathError(`Session cwd is outside PiRoot (${piRoot}): ${cwd}`, cwd);
 		}
 
-		// Legacy per-cwd storage is read-only: continue in the PiRoot namespace.
-		if (piRoot) {
-			const migrated = SessionManager.migrateLegacySession(resolvedPath, header, preloadedFileEntries, cwd);
-			if (migrated) {
-				return new SessionManager(cwd, normalizePath(getDefaultSessionDirPath(piRoot)), migrated, true);
-			}
-		}
-
 		// If no sessionDir provided, derive from file's parent directory
 		const dir = sessionDir ? normalizePath(sessionDir) : resolve(resolvedPath, "..");
 		return new SessionManager(cwd, dir, resolvedPath, true, undefined, preloadedFileEntries);
@@ -1795,10 +1690,7 @@ export class SessionManager {
 	/**
 	 * Continue the most recent session, or create new if none.
 	 *
-	 * When PiRoot is set, discovers candidate directories from the
-	 * PiRoot namespace and legacy per-cwd directories inside PiRoot,
-	 * then applies PiRoot containment filtering so the result is
-	 * consistent with list/findById.
+	 * When PiRoot is set, applies PiRoot containment filtering consistently with list/findById.
 	 *
 	 * @param cwd Working directory
 	 * @param sessionDir Optional session directory. If omitted, uses default (~/.pi/agent/sessions/<encoded-cwd>/).
@@ -1809,11 +1701,7 @@ export class SessionManager {
 		const resolvedCwd = resolvePath(cwd);
 		const filterCwd = piRoot === undefined && sessionDir !== undefined && dir !== getDefaultSessionDirPath(cwd);
 
-		// Discovery: configured storage source plus legacy PiRoot dirs.
 		const candidateDirs = new Set<string>([dir]);
-		if (piRoot) {
-			for (const legacy of getLegacyPiRootSessionDirs(piRoot)) candidateDirs.add(legacy);
-		}
 
 		// Visibility is decided per session, not per directory: a directory may
 		// mix sessions from several PiRoots (for example a shared
@@ -1937,9 +1825,7 @@ export class SessionManager {
 	/**
 	 * Find an exact session ID without loading transcript bodies.
 	 *
-	 * When PiRoot is set, searches the PiRoot namespace directory and
-	 * legacy per-cwd directories inside PiRoot, then filters by
-	 * session.cwd ∈ PiRoot. When PiRoot is not set, behavior is unchanged.
+	 * Searches the selected session directory and enforces PiRoot containment.
 	 *
 	 * @param cwd Working directory (used to compute default session directory)
 	 * @param id Exact session ID
@@ -1949,14 +1835,7 @@ export class SessionManager {
 		const piRoot = getPiRoot();
 		const dir = sessionDir ? normalizePath(sessionDir) : getDefaultSessionDir(cwd);
 
-		// Collect candidate directories: configured sessionDir (or its default)
-		// plus legacy PiRoot dirs when PiRoot is set.
 		const candidateDirs = new Set<string>([dir]);
-		if (piRoot && sessionDir === undefined) {
-			for (const legacy of getLegacyPiRootSessionDirs(piRoot)) {
-				candidateDirs.add(legacy);
-			}
-		}
 
 		for (const scanDir of candidateDirs) {
 			try {
@@ -1981,9 +1860,7 @@ export class SessionManager {
 	 *
 	 * Storage discovery and visibility filtering are separate concerns:
 	 *
-	 * 1. Discovery: candidate directories come from the configured
-	 *    sessionDir (or its per-cwd default) and, when PiRoot is set, legacy
-	 *    per-cwd directories inside PiRoot.
+	 * 1. Discovery: candidate files come from the configured sessionDir or default.
 	 * 2. Visibility: when PiRoot is set, a session is visible only when its
 	 *    recorded cwd is inside PiRoot. This applies regardless of which
 	 *    storage source the file came from, so `--session-dir`,
@@ -2005,11 +1882,7 @@ export class SessionManager {
 		const piRoot = getPiRoot();
 		const dir = sessionDir ? normalizePath(sessionDir) : getDefaultSessionDir(cwd);
 
-		// Discovery: configured storage source plus legacy PiRoot dirs.
 		const candidateDirs = new Set<string>([dir]);
-		if (piRoot) {
-			for (const legacy of getLegacyPiRootSessionDirs(piRoot)) candidateDirs.add(legacy);
-		}
 
 		const resolvedCwd = resolvePath(cwd);
 		const filterCwd = piRoot === undefined && sessionDir !== undefined && dir !== getDefaultSessionDirPath(cwd);
@@ -2069,7 +1942,7 @@ export class SessionManager {
 			return sortSessionInfos(sessions.filter((s) => includePiRoot(s.cwd)));
 		}
 
-		const sessionsDir = getSessionsDir();
+		const sessionsDir = piRoot ? join(getPiRootRuntimeDir(piRoot)!, "sessions") : getSessionsDir();
 
 		try {
 			if (!existsSync(sessionsDir)) return [];
@@ -2077,14 +1950,8 @@ export class SessionManager {
 			const dirs = entries
 				.filter((entry) => entry.isDirectory() || entry.isSymbolicLink())
 				.map((entry) => join(sessionsDir, entry.name));
-
-			// When PiRoot is set, also include legacy per-cwd directories that
-			// fall inside the PiRoot so no history is lost.
-			if (piRoot) {
-				const legacyDirs = getLegacyPiRootSessionDirs(piRoot);
-				for (const ld of legacyDirs) {
-					if (!dirs.includes(ld)) dirs.push(ld);
-				}
+			for (const file of entries.filter((entry) => entry.isFile() && entry.name.endsWith(".jsonl"))) {
+				dirs.push(join(sessionsDir, file.name));
 			}
 
 			const dirFiles = await mapWithConcurrency(
@@ -2092,6 +1959,7 @@ export class SessionManager {
 				MAX_CONCURRENT_SESSION_DISCOVERY_LOADS,
 				async (dir) => {
 					try {
+						if (dir.endsWith(".jsonl")) return [dir];
 						return (await readdir(dir)).filter((file) => file.endsWith(".jsonl")).map((file) => join(dir, file));
 					} catch {
 						return [];

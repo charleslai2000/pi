@@ -25,6 +25,7 @@ describe("PiRoot application startup", () => {
 		const base = mkdtempSync(join(tmpdir(), "pi-root-application-"));
 		const root = join(base, "project");
 		mkdirSync(join(root, ".pi"), { recursive: true });
+		mkdirSync(join(root, "control"), { recursive: true });
 		mkdirSync(join(root, "design"), { recursive: true });
 		const agentDir = join(base, "agent");
 		const faux = registerFauxProvider();
@@ -75,7 +76,7 @@ describe("PiRoot application startup", () => {
 		});
 		expect(application.poolSize).toBe(1);
 		expect(application.foregroundSessionId).toBe(application.canonicalControlSessionId);
-		expect(application.foregroundCwd).toBe(join(root, ".pi"));
+		expect(application.foregroundCwd).toBe(join(root, "control"));
 		expect(application.registry.activeRows().map((row) => row.session_id)).toEqual([
 			application.canonicalControlSessionId,
 		]);

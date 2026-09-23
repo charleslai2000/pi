@@ -35,7 +35,10 @@ function session(
 function logicalRows(registry: SessionRegistry): unknown[] {
 	return registry
 		.rows()
-		.map(({ session_id, session_file, cwd, name, role }) => ({ session_id, session_file, cwd, name, role }));
+		.map(({ session_id, session_file, cwd, name, role }) => ({ session_id, session_file, cwd, name, role }))
+		.sort((left, right) =>
+			(left as { session_id: string }).session_id.localeCompare((right as { session_id: string }).session_id),
+		);
 }
 
 describe("SessionRegistry control plane", () => {
@@ -45,13 +48,14 @@ describe("SessionRegistry control plane", () => {
 		const base = mkdtempSync(join("/tmp", "pi-registry-formal-"));
 		const root = join(base, "project");
 		mkdirSync(join(root, ".pi"), { recursive: true });
+		mkdirSync(join(root, "control"), { recursive: true });
 		const design = join(root, "design");
 		const experiments = join(root, "experiments");
 		mkdirSync(design, { recursive: true });
 		mkdirSync(experiments, { recursive: true });
 		setPiRoot(root, "formal");
-		expect(resolvePiRootInfo({ cwd: design })).toEqual({ root, controlDir: join(root, ".pi"), mode: "formal" });
-		expect(getPiRootControlDir(root)).toBe(join(root, ".pi"));
+		expect(resolvePiRootInfo({ cwd: design })).toEqual({ root, controlDir: join(root, "control"), mode: "formal" });
+		expect(getPiRootControlDir(root)).toBe(join(root, "control"));
 
 		const registry = new SessionRegistry(root);
 		const rows = [
@@ -77,17 +81,14 @@ describe("SessionRegistry control plane", () => {
 		rmSync(base, { recursive: true, force: true });
 	});
 
-	it("uses legacy control/state without creating PiRoot/.pi", () => {
+	it("rejects a control-only directory as a formal PiRoot", () => {
 		const base = mkdtempSync(join("/tmp", "pi-registry-legacy-"));
 		const root = join(base, "project");
 		const control = join(root, "control");
 		mkdirSync(control, { recursive: true });
-		setPiRoot(root, "legacy");
-		expect(resolvePiRootInfo({ cwd: control })).toEqual({ root, controlDir: control, mode: "legacy" });
-		const registry = new SessionRegistry(root);
-		expect(existsSync(join(root, ".pi"))).toBe(false);
-		expect(existsSync(join(control, "state", "control.sqlite3"))).toBe(true);
-		registry.close();
+		setPiRoot(root, "formal");
+		expect(() => resolvePiRootInfo({ cwd: control })).toThrow();
+		expect(() => new SessionRegistry(root)).toThrow();
 		rmSync(base, { recursive: true, force: true });
 	});
 
@@ -95,6 +96,7 @@ describe("SessionRegistry control plane", () => {
 		const base = mkdtempSync(join("/tmp", "pi-registry-crash-"));
 		const root = join(base, "project");
 		mkdirSync(join(root, ".pi"), { recursive: true });
+		mkdirSync(join(root, "control"), { recursive: true });
 		setPiRoot(root, "formal");
 		const registry = new SessionRegistry(root);
 		const a = session("a", join(root, "a"), "a");

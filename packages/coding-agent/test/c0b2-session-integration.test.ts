@@ -9,6 +9,7 @@ function state(): { root: string; registry: SessionRegistry; pool: SessionPool }
 	const base = mkdtempSync(join("/tmp", "pi-c0b2-integration-"));
 	const root = join(base, "project");
 	mkdirSync(join(root, ".pi"), { recursive: true });
+	mkdirSync(join(root, "control"), { recursive: true });
 	setPiRoot(root, "formal");
 	const registry = new SessionRegistry(root);
 	setSessionRegistryForTesting(registry);

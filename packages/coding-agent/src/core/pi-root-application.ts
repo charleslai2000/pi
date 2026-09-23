@@ -1,9 +1,11 @@
+import { join } from "node:path";
 import {
 	type AgentSessionRuntime,
 	type CreateAgentSessionRuntimeFactory,
 	createAgentSessionRuntime,
 } from "./agent-session-runtime.ts";
-import { resolvePiRootInfo, setPiRoot } from "./pi-root.ts";
+import { readAssociations } from "./control/associations.ts";
+import { getPiRootRuntimeDir, resolvePiRootInfo, setPiRoot } from "./pi-root.ts";
 import { initializeSessionRegistry, type SessionRegistry } from "./session-registry.ts";
 
 export interface PiRootApplication {
@@ -26,17 +28,28 @@ export async function startPiRootApplication(options: {
 }): Promise<PiRootApplication> {
 	const info = resolvePiRootInfo({ explicitRoot: options.root, cwd: options.root });
 	setPiRoot(info.root, info.mode);
+	const runtimeDir = getPiRootRuntimeDir(info.root);
+	if (!runtimeDir) throw new Error(`PiRoot has no runtime directory: ${info.root}`);
+	const sessionDir = options.sessionDir ?? join(runtimeDir, "sessions");
 	const registry = await initializeSessionRegistry(info.root, {
 		...options.registryOptions,
-		sessionDir: options.sessionDir,
+		sessionDir,
 	});
-	const sessionManager = await registry.openCanonicalControl(options.sessionDir);
+	const sessionManager = await registry.openCanonicalControl(sessionDir);
 	const runtimeHost = await createAgentSessionRuntime(options.createRuntime, {
 		cwd: sessionManager.getCwd(),
 		agentDir: options.agentDir,
 		sessionManager,
 	});
 	const slot = runtimeHost.sessionPool.getForeground();
+	for (const assignment of readAssociations(info.root).current) {
+		if (runtimeHost.sessionPool.findBySessionId(assignment.sessionId)) continue;
+		const executorRow = registry.rows().find((row) => row.session_id === assignment.sessionId);
+		if (!executorRow?.session_file)
+			throw new Error(`Assigned Executor Session is unavailable: ${assignment.sessionId}`);
+		const prepared = await runtimeHost.prepareSession(executorRow.session_file);
+		await runtimeHost.resumePrepared(prepared);
+	}
 	registry.upsert({
 		id: slot.session.sessionManager.getSessionId(),
 		file: slot.session.sessionFile,
@@ -49,7 +62,7 @@ export async function startPiRootApplication(options: {
 		registry,
 		runtimeHost,
 		canonicalControlSessionId,
-		canonicalControlSessionFile: slot.session.sessionFile,
+		canonicalControlSessionFile: registry.canonicalControlSession()?.session_file ?? undefined,
 		poolSize: runtimeHost.sessionPool.list().length,
 		foregroundSessionId: slot.session.sessionManager.getSessionId(),
 		foregroundCwd: slot.cwd,

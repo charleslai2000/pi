@@ -1,6 +1,7 @@
 import { constants, copyFileSync, existsSync, mkdirSync } from "node:fs";
 import { basename, join, parse, resolve } from "node:path";
-import type { AgentTool } from "@earendil-works/pi-agent-core";
+import type { AgentMessage, AgentTool } from "@earendil-works/pi-agent-core";
+import type { AssistantMessage } from "@earendil-works/pi-ai";
 import { resolvePath } from "../utils/paths.ts";
 import type { AgentSession } from "./agent-session.ts";
 import type { AgentSessionRuntimeDiagnostic, AgentSessionServices } from "./agent-session-services.ts";
@@ -12,9 +13,11 @@ import {
 	readAssociations,
 	reassignTaskToSession,
 	unassignTask,
+	unassignTaskLocked,
+	withAssociationMutationLock,
 } from "./control/associations.ts";
 import { listGoals, listTasks, readGoal, readTask } from "./control/read-model.ts";
-import { createTask, reviseTask } from "./control/task-definitions.ts";
+import { createGoal, createTask, reviseGoal, reviseTask } from "./control/task-definitions.ts";
 import {
 	dependencySatisfied,
 	listDerivedFrontier,
@@ -37,10 +40,15 @@ import type {
 	SessionStartEvent,
 } from "./extensions/index.ts";
 import { emitSessionShutdownEvent } from "./extensions/runner.ts";
-import { assertCwdInsidePiRoot, assertSessionCwdInsidePiRoot, getPiRootControlCwd } from "./pi-root.ts";
+import {
+	assertCwdInsidePiRoot,
+	assertSessionCwdInsidePiRoot,
+	getPiRootControlCwd,
+	getPiRootRuntimeDir,
+} from "./pi-root.ts";
 import type { CreateAgentSessionResult } from "./sdk.ts";
 import { assertSessionCwdExists } from "./session-cwd.ts";
-import { getDefaultSessionDir, SessionManager } from "./session-manager.ts";
+import { SessionManager } from "./session-manager.ts";
 import { SessionPool, type SessionSlot } from "./session-pool.ts";
 import { getSessionRegistry } from "./session-registry.ts";
 
@@ -50,6 +58,65 @@ import { getSessionRegistry } from "./session-registry.ts";
  * The caller gets the created session, its cwd-bound services, and all
  * diagnostics collected during setup.
  */
+type ExecutorStopReason =
+	| "completed"
+	| "waiting_user"
+	| "waiting_approval"
+	| "blocked_external"
+	| "terminated"
+	| "continue_possible";
+
+type ExecutorStopEnvelope = {
+	reason: ExecutorStopReason;
+	result?: string;
+	remaining?: string;
+	evidence?: string[];
+	reasonDetail?: string;
+};
+
+const EXECUTOR_STOP_OPEN = "<pi-executor-stop>";
+const EXECUTOR_STOP_CLOSE = "</pi-executor-stop>";
+
+function textOfAssistant(message: AssistantMessage): string {
+	return Array.isArray(message.content)
+		? message.content
+				.filter((part) => part.type === "text")
+				.map((part) => part.text)
+				.join("")
+		: message.content;
+}
+
+function parseExecutorStopEnvelope(messages: readonly AgentMessage[]): ExecutorStopEnvelope | undefined {
+	const last = [...messages].reverse().find((message): message is AssistantMessage => message.role === "assistant");
+	if (!last) return undefined;
+	const text = textOfAssistant(last).trim();
+	if (!text.startsWith(EXECUTOR_STOP_OPEN) || !text.endsWith(EXECUTOR_STOP_CLOSE)) return undefined;
+	const json = text.slice(EXECUTOR_STOP_OPEN.length, -EXECUTOR_STOP_CLOSE.length).trim();
+	try {
+		const value = JSON.parse(json) as Record<string, unknown>;
+		const reasons: ExecutorStopReason[] = [
+			"completed",
+			"waiting_user",
+			"waiting_approval",
+			"blocked_external",
+			"terminated",
+			"continue_possible",
+		];
+		if (typeof value.reason !== "string" || !reasons.includes(value.reason as ExecutorStopReason)) return undefined;
+		if (value.result !== undefined && typeof value.result !== "string") return undefined;
+		if (value.remaining !== undefined && typeof value.remaining !== "string") return undefined;
+		if (value.reasonDetail !== undefined && typeof value.reasonDetail !== "string") return undefined;
+		if (
+			value.evidence !== undefined &&
+			(!Array.isArray(value.evidence) || value.evidence.some((item) => typeof item !== "string"))
+		)
+			return undefined;
+		return value as unknown as ExecutorStopEnvelope;
+	} catch {
+		return undefined;
+	}
+}
+
 const CONTROLLER_SESSION_PROTOCOL = [
 	"You are the canonical Controller Session for this PiRoot.",
 	"Controller is a policy LLM: runtime delivers factual Task/Executor notices and atomic tools, but never chooses orchestration policy for you.",
@@ -62,7 +129,7 @@ const CONTROLLER_SESSION_PROTOCOL = [
 	"Do not escalate indefinitely: if no better justified model is available, the Task has no clear next action, or another switch would be speculative, stop and wait naturally. Runtime never performs this decision for you.",
 	"A completed Task remains DONE. Review is conditional: do not review every Task by default; create an ordinary review Task only when the Task type, risk, result, evidence, or model makes a concrete quality benefit worthwhile.",
 	"Create a review Task with create_task, include the reviewed Task identity and result, review objective, acceptance criteria, and evidence or risk checks, then use set_task_dependencies so it depends on the completed Task. Dispatch it with the ordinary frontier and dispatch_task tools.",
-	"A reviewer is an ordinary Executor with only task_gate, task_memory, and task_result. A passing review completes the review Task and never modifies or reopens the original Task.",
+	"A reviewer is an ordinary Executor with only task_gate and task_memory. A passing review completes the review Task through the Executor stop envelope and never modifies or reopens the original Task.",
 	"If review findings require work, record findings in the review Task, complete it, and create an ordinary remediation Task with create_task and explicit DAG prerequisites. Do not reopen the original Task.",
 	"Avoid duplicate review Tasks for the same completed result: inspect existing Tasks and their durable memory before creating one. Do not create a review/remediation loop without a new concrete result or finding.",
 	"There is no ReviewExecution or reviewer-specific runtime; review and remediation are normal Tasks and must settle when no clear next action exists.",
@@ -153,8 +220,10 @@ export class AgentSessionRuntime {
 	private _modelFallbackMessage?: string;
 	private replacementSlot?: SessionSlot;
 	private readonly taskSessionBindings = new Map<string, () => void>();
-	private readonly taskSessionAdmission = new Map<string, { accepted: boolean; resulted: boolean }>();
+	private taskRunGenerations = new Map<string, number>();
+	private readonly taskSessionAdmission = new Map<string, { accepted: boolean; resulted: boolean; active: boolean }>();
 	private controllerNoticeKeys = new Set<string>();
+	private suppressExecutorSettlement = new Set<string>();
 
 	constructor(
 		_session: AgentSession,
@@ -246,11 +315,10 @@ export class AgentSessionRuntime {
 		if (!controllerId) return;
 		const controller = this._sessionPool.findBySessionId(controllerId);
 		if (!controller) return;
-		if (controller.session.isStreaming) {
-			await controller.session.steer(message, undefined, { source: "extension" });
-		} else {
-			await controller.session.prompt(message, { expandPromptTemplates: false, source: "extension" });
-		}
+		await controller.session.sendCustomMessage(
+			{ customType: "control_event", content: message, display: true, details: { factKey } },
+			{ triggerTurn: true, deliverAs: controller.session.isStreaming ? "followUp" : undefined },
+		);
 	}
 
 	private async notifyTaskChange(
@@ -302,11 +370,12 @@ export class AgentSessionRuntime {
 		goalId: string,
 		taskId: string,
 		sessionId: string,
-		admission: { accepted: boolean; resulted: boolean },
+		admission: { accepted: boolean; resulted: boolean; active: boolean; assignmentGeneration: number },
 	): boolean {
 		if (!admission.accepted || admission.resulted || this.taskSessionAdmission.get(sessionId) !== admission)
 			return false;
-		return this.getTaskAssignment(goalId, taskId)?.sessionId === sessionId;
+		const assignment = this.getTaskAssignment(goalId, taskId);
+		return assignment?.sessionId === sessionId && assignment.generation === admission.assignmentGeneration;
 	}
 
 	assignTask(goalId: string, taskId: string, sessionId: string): Promise<AssociationMutationResult> {
@@ -316,6 +385,7 @@ export class AgentSessionRuntime {
 	async unassignTask(goalId: string, taskId: string): Promise<AssociationMutationResult> {
 		const current = this.getTaskAssignment(goalId, taskId);
 		const result = await unassignTask(this.associationRoot(), goalId, taskId);
+		getSessionRegistry()?.refreshRoles();
 		if (result.changed && current) this.taskSessionBindings.get(current.sessionId)?.();
 		if (result.changed && current) this.taskSessionBindings.delete(current.sessionId);
 		return result;
@@ -324,6 +394,7 @@ export class AgentSessionRuntime {
 	async reassignTask(goalId: string, taskId: string, sessionId: string): Promise<AssociationMutationResult> {
 		const current = this.getTaskAssignment(goalId, taskId);
 		const result = await reassignTaskToSession(this.associationRoot(), goalId, taskId, sessionId);
+		getSessionRegistry()?.refreshRoles();
 		if (result.changed && current && current.sessionId !== sessionId) {
 			this.taskSessionBindings.get(current.sessionId)?.();
 			this.taskSessionBindings.delete(current.sessionId);
@@ -375,6 +446,40 @@ export class AgentSessionRuntime {
 
 	private installControllerTools(_session: AgentSession): void {
 		const text = (value: string) => ({ content: [{ type: "text" as const, text: value }], details: undefined });
+		this.controllerTool(
+			_session,
+			"create_goal",
+			"Create a Goal authority directory with goal.md without raw file mutation.",
+			{
+				type: "object",
+				properties: { goalId: { type: "string" }, title: { type: "string" }, status: { type: "string" } },
+				required: ["goalId"],
+				additionalProperties: false,
+			} as AgentTool["parameters"],
+			async (_id, raw) => {
+				const p = raw as Record<string, unknown>;
+				return text(
+					`Created Goal ${String(p.goalId)} at ${createGoal(this.associationRoot(), String(p.goalId), { title: p.title as string | undefined, status: p.status as string | undefined })}`,
+				);
+			},
+		);
+		this.controllerTool(
+			_session,
+			"revise_goal",
+			"Revise managed Goal fields without raw file mutation.",
+			{
+				type: "object",
+				properties: { goalId: { type: "string" }, title: { type: "string" }, status: { type: "string" } },
+				required: ["goalId"],
+				additionalProperties: false,
+			} as AgentTool["parameters"],
+			async (_id, raw) => {
+				const p = raw as Record<string, unknown>;
+				return text(
+					`Revised Goal ${String(p.goalId)} at ${reviseGoal(this.associationRoot(), String(p.goalId), { title: p.title as string | undefined, status: p.status as string | undefined })}`,
+				);
+			},
+		);
 		this.controllerTool(
 			_session,
 			"create_task",
@@ -560,7 +665,9 @@ export class AgentSessionRuntime {
 				if (p.sessionId !== undefined && !target)
 					throw new Error(`Executor Session is not live: ${String(p.sessionId)}`);
 				if (!target) {
-					const manager = SessionManager.create(this.cwd, getDefaultSessionDir(this.cwd, this.services.agentDir));
+					const runtimeDir = getPiRootRuntimeDir(this.associationRoot());
+					if (!runtimeDir) throw new Error("PiRoot runtime directory is unavailable");
+					const manager = SessionManager.create(this.cwd, join(runtimeDir, "sessions"));
 					if (manager.getSessionFile() && !existsSync(manager.getSessionFile()!)) manager.persistSessionHeader();
 					const result = await this.createRuntime({
 						cwd: this.cwd,
@@ -575,6 +682,7 @@ export class AgentSessionRuntime {
 					task.taskId,
 					target.session.sessionManager.getSessionId(),
 				);
+				getSessionRegistry()?.refreshRoles();
 				await this.startAssignedTask(task.goalId, task.taskId);
 				return text(`Dispatched ${task.goalId}/${task.taskId} to ${target.session.sessionManager.getSessionId()}`);
 			},
@@ -665,6 +773,8 @@ export class AgentSessionRuntime {
 		);
 		_session.setActiveToolsByName([
 			..._session.getActiveToolNames(),
+			"create_goal",
+			"revise_goal",
 			"create_task",
 			"revise_task",
 			"inspect_task",
@@ -689,44 +799,95 @@ export class AgentSessionRuntime {
 		const slot = this._sessionPool.findBySessionId(assignment.sessionId);
 		if (!slot) throw new Error(`Assigned Session is not live: ${assignment.sessionId}`);
 		this.taskSessionBindings.get(assignment.sessionId)?.();
-		const admission = { accepted: options?.admitted === true, resulted: false };
+		const admission = {
+			accepted: options?.admitted === true,
+			resulted: false,
+			active: true,
+			assignmentGeneration: assignment.generation,
+		};
 		const previousTools = slot.session.getActiveToolNames();
 		let activateTaskTools = (): void => {};
 		this.taskSessionAdmission.set(assignment.sessionId, admission);
+		const sessionId = assignment.sessionId;
+		const assignmentGeneration = assignment.generation;
+		const runGenerations = this.taskRunGenerations ?? new Map<string, number>();
+		this.taskRunGenerations = runGenerations;
+		const runGeneration = (runGenerations.get(sessionId) ?? 0) + 1;
+		runGenerations.set(sessionId, runGeneration);
 		const removeLifecycleListener = slot.session.subscribe((event) => {
-			if (
-				event.type === "agent_start" &&
-				this.isCurrentTaskBinding(goalId, taskId, assignment.sessionId, admission)
-			) {
-				const current = readTask(piRoot, goalId, taskId);
-				if (parseTaskStatus(current.status) === "BLOCKED")
-					void updateTaskStatus(piRoot, goalId, taskId, { status: "ACTIVE" });
+			if (!admission.active) return;
+			if (event.type === "agent_start") {
+				runGenerations.set(sessionId, (runGenerations.get(sessionId) ?? runGeneration) + 1);
+				if (!this.isCurrentTaskBinding(goalId, taskId, sessionId, admission)) return;
+				const startedGeneration = runGenerations.get(sessionId);
+				void withAssociationMutationLock(piRoot, async () => {
+					if (
+						runGenerations.get(sessionId) !== startedGeneration ||
+						!this.isCurrentTaskBinding(goalId, taskId, sessionId, admission) ||
+						this.getTaskAssignment(goalId, taskId)?.generation !== assignmentGeneration
+					)
+						return;
+					const current = readTask(piRoot, goalId, taskId);
+					if (parseTaskStatus(current.status) === "BLOCKED")
+						await updateTaskStatus(piRoot, goalId, taskId, { status: "ACTIVE" });
+				});
+				return;
 			}
-			if (
-				event.type === "agent_settled" &&
-				this.isCurrentTaskBinding(goalId, taskId, assignment.sessionId, admission)
-			) {
-				const context = this.getExecutorContextSnapshot(assignment.sessionId);
-				if (context?.budgetState === "exhausted")
-					void this.notifyTaskChange(
-						goalId,
-						taskId,
-						"ACTIVE",
-						assignment.sessionId,
-						"executor context budget exhausted",
-					);
-				const current = readTask(piRoot, goalId, taskId);
-				if (parseTaskStatus(current.status) === "ACTIVE")
-					void updateTaskStatus(piRoot, goalId, taskId, { status: "BLOCKED" }).then(() =>
-						this.notifyTaskChange(
-							goalId,
-							taskId,
-							"BLOCKED",
-							assignment.sessionId,
-							"executor settled without task_result",
-						),
-					);
-			}
+			if (event.type !== "agent_settled") return;
+			const settleGeneration = runGenerations.get(sessionId) ?? runGeneration;
+			if (!slot.session.isIdle) return;
+			if (this.suppressExecutorSettlement.delete(sessionId)) return;
+			const envelope = parseExecutorStopEnvelope(slot.session.messages);
+			const result = envelope?.result;
+			const remaining = envelope?.remaining ?? envelope?.reasonDetail;
+			const reason = envelope?.reason ?? "premature_settle";
+			const acceptedRun = admission.accepted;
+			void withAssociationMutationLock(piRoot, async () => {
+				if (
+					runGenerations.get(sessionId) !== settleGeneration ||
+					!acceptedRun ||
+					!this.isCurrentTaskBinding(goalId, taskId, sessionId, admission) ||
+					this.getTaskAssignment(goalId, taskId)?.generation !== assignmentGeneration ||
+					!slot.session.isIdle ||
+					slot.session.isCompacting === true
+				)
+					return;
+				const latest = readTask(piRoot, goalId, taskId);
+				const latestStatus = parseTaskStatus(latest.status);
+				if (reason === "terminated" && latestStatus !== "ACTIVE") return;
+				if (latestStatus !== "ACTIVE" && !(reason === "completed" && latestStatus === "BLOCKED")) return;
+				if (reason === "completed") {
+					await completeTask(piRoot, goalId, taskId, { result, remaining });
+					admission.resulted = true;
+					unassignTaskLocked(piRoot, goalId, taskId);
+					getSessionRegistry()?.refreshRoles();
+					return;
+				} else if (reason === "terminated") {
+					await updateTaskStatus(piRoot, goalId, taskId, { status: "DEFERRED", result, remaining });
+					admission.resulted = true;
+					unassignTaskLocked(piRoot, goalId, taskId);
+					getSessionRegistry()?.refreshRoles();
+					return { status: "DEFERRED", reason: "executor terminated by stop envelope" };
+				} else if (reason === "continue_possible") {
+					return;
+				} else {
+					await updateTaskStatus(piRoot, goalId, taskId, {
+						status: "BLOCKED",
+						result,
+						remaining:
+							remaining ??
+							(envelope
+								? `executor stop reason: ${reason}`
+								: "protocol violation: missing or invalid stop envelope"),
+					});
+					return {
+						status: "BLOCKED",
+						reason: envelope ? `executor stop reason: ${reason}` : "protocol violation",
+					};
+				}
+			}).then(async (notice) => {
+				if (notice) await this.notifyTaskChange(goalId, taskId, notice.status, sessionId, notice.reason);
+			});
 		});
 		const taskGate = slot.session.installTemporaryTool({
 			name: "task_gate",
@@ -768,54 +929,6 @@ export class AgentSessionRuntime {
 				return { content: [{ type: "text", text: `Rejected ${goalId}/${taskId}` }], details: params.reason };
 			},
 		});
-		const taskResult = slot.session.installTemporaryTool({
-			name: "task_result",
-			label: "Task result",
-			description:
-				"The only formal exit for the current Task tenure. When the Completion criteria are satisfied, call task_result with outcome=complete before any unrelated work or settling; do not claim completion only in text. After saving necessary durable memory, call outcome=terminated when instructed to terminate.",
-			parameters: {
-				type: "object",
-				properties: {
-					outcome: { type: "string", enum: ["complete", "terminated"] },
-					result: { type: "string" },
-					remaining: { type: "string" },
-					reason: { type: "string" },
-				},
-				required: ["outcome"],
-				additionalProperties: false,
-			} as AgentTool["parameters"],
-			execute: async (_toolCallId: string, rawParams: unknown) => {
-				if (!admission.accepted) throw new Error("Task gate must be accepted before task_result");
-				const params = rawParams as { outcome?: unknown; result?: unknown; remaining?: unknown; reason?: unknown };
-				if (params.outcome !== "complete" && params.outcome !== "terminated")
-					throw new Error("Invalid task_result outcome");
-				if (params.result !== undefined && typeof params.result !== "string")
-					throw new Error("Invalid task_result result");
-				if (params.remaining !== undefined && typeof params.remaining !== "string")
-					throw new Error("Invalid task_result remaining");
-				if (params.outcome === "complete")
-					await completeTask(piRoot, goalId, taskId, { result: params.result, remaining: params.remaining });
-				else
-					await updateTaskStatus(piRoot, goalId, taskId, {
-						status: "DEFERRED",
-						result: params.result,
-						remaining: params.remaining,
-					});
-				admission.resulted = true;
-				await unassignTask(piRoot, goalId, taskId);
-				await this.notifyTaskChange(
-					goalId,
-					taskId,
-					params.outcome === "complete" ? "DONE" : "DEFERRED",
-					assignment.sessionId,
-					`executor reported ${params.outcome}`,
-				);
-				return {
-					content: [{ type: "text", text: `Recorded ${params.outcome} for ${goalId}/${taskId}` }],
-					details: params.reason,
-				};
-			},
-		});
 		const removeMemoryTool = slot.session.installTemporaryTool({
 			name: "task_memory",
 			label: "Task memory",
@@ -846,9 +959,10 @@ export class AgentSessionRuntime {
 				"This is a long-lived assigned Task Session.",
 				"Task Markdown is the lifecycle SSOT and durable memory; chat history is working memory, not the only authority.",
 				"Users may participate normally at any time. Settling does not complete or unassign the Task.",
-				"First call task_gate with accept or reject. If accepted, the Task becomes ACTIVE. If you naturally settle without task_result, the Task is treated as BLOCKED while this assignment remains.",
-				"task_result is the only formal exit from this Task tenure. Once the Completion criteria are satisfied, you MUST call task_result(outcome=complete, result=...) before unrelated work or natural settling; a text claim that the Task is complete is not sufficient. If termination is instructed, save necessary durable memory with task_memory, then MUST call task_result(outcome=terminated, reason=..., remaining=...).",
-				"task_memory is optional durable memory; it does not replace the required task_result lifecycle action when Completion is satisfied or termination is instructed.",
+				"First call task_gate with accept or reject. If accepted, the Task becomes ACTIVE.",
+				'Before true quiescence, emit exactly one final stop envelope: <pi-executor-stop>{\\"reason\\":\\"completed|waiting_user|waiting_approval|blocked_external|terminated|continue_possible\\",\\"result\\":\\"...\\",\\"remaining\\":\\"...\\",\\"evidence\\":[\\"...\\"],\\"reasonDetail\\":\\"...\\"}</pi-executor-stop>.',
+				"The runtime parses and validates the stop envelope at quiescence; ordinary prose is never used to guess lifecycle state.",
+				"Executor lifecycle is determined only by the stop envelope validated by the runtime at quiescence; task_memory is optional durable memory.",
 				"When durable information should survive compaction, restart, reassignment, or long pauses, decide whether to use task_memory; do not write transient reasoning or chat noise mechanically.",
 			].join("\n"),
 		);
@@ -857,7 +971,7 @@ export class AgentSessionRuntime {
 			"Task Markdown is the Task lifecycle authority and durable memory.",
 			"Read the task file and work in this Session's cwd.",
 			"Write important decisions, results, evidence, blockers, invariants, and next steps back to task.md.",
-			"Settling this Session does not complete the Task. Only the controlled Task lifecycle mutation can set DONE or CANCELLED.",
+			"Settling this Session does not complete the Task until the runtime validates the final stop envelope.",
 			"Continue this same Task and Session on later user messages or recovery.",
 			"",
 			`Goal: ${goalId}`,
@@ -872,14 +986,14 @@ export class AgentSessionRuntime {
 			...(task.result === undefined ? [] : [`Current result: ${task.result}`]),
 			...(task.remaining === undefined ? [] : [`Current remaining: ${task.remaining}`]),
 		].join("\n");
-		activateTaskTools = () => slot.session.setActiveToolsByName([...previousTools, "task_memory", "task_result"]);
+		activateTaskTools = () => slot.session.setActiveToolsByName([...previousTools, "task_memory"]);
 		if (options?.admitted) activateTaskTools();
 		else slot.session.setActiveToolsByName(["task_gate"]);
 		this.taskSessionBindings.set(assignment.sessionId, () => {
+			admission.active = false;
 			removeLifecycleListener();
 			this.taskSessionAdmission.delete(assignment.sessionId);
 			taskGate();
-			taskResult();
 			removeMemoryTool();
 		});
 		if (!options?.admitted) await slot.session.prompt(payload, { expandPromptTemplates: false, source: "extension" });
@@ -1061,7 +1175,9 @@ export class AgentSessionRuntime {
 		withSession?: (ctx: ReplacedSessionContext) => Promise<void>,
 	): Promise<void> {
 		const slot = this.apply(prepared.result, false);
-		await this.switchForeground(slot.id);
+		this.suppressExecutorSettlement.delete(slot.session.sessionManager.getSessionId());
+		this._sessionPool.setForeground(slot.id);
+		await this.finishSessionReplacement(withSession);
 		if (withSession) await withSession(this.session.createReplacedSessionContext());
 	}
 
@@ -1108,7 +1224,10 @@ export class AgentSessionRuntime {
 		// Defense-in-depth: SessionManager.create also enforces this.
 		assertCwdInsidePiRoot(targetCwd);
 		const previousSessionFile = this.session.sessionFile;
-		const sessionManager = SessionManager.create(targetCwd, getDefaultSessionDir(targetCwd, this.services.agentDir));
+		const root = this.associationRoot();
+		const runtimeDir = getPiRootRuntimeDir(root);
+		if (!runtimeDir) throw new Error("PiRoot runtime directory is unavailable");
+		const sessionManager = SessionManager.create(targetCwd, join(runtimeDir, "sessions"));
 		if (options?.parentSession) sessionManager.newSession({ parentSession: options.parentSession });
 		assertSessionCwdExists(sessionManager, this.cwd);
 		const result = await this.createRuntime({
@@ -1185,6 +1304,8 @@ export class AgentSessionRuntime {
 
 		const previousSessionFile = this.session.sessionFile;
 		if (this.session.sessionManager.isPersisted()) {
+			if (this.sessionPool.getForeground().activity.busy)
+				this.suppressExecutorSettlement.add(this.session.sessionManager.getSessionId());
 			const currentSessionFile = this.session.sessionFile;
 			if (!currentSessionFile) {
 				throw new Error("Persisted session is missing a session file");
@@ -1301,13 +1422,28 @@ export class AgentSessionRuntime {
 		return { cancelled: false };
 	}
 
-	listActiveSessions(): Array<{ row?: unknown; slot: SessionSlot }> {
+	listActiveSessions(): Array<{
+		row?: import("./session-registry.ts").RegistryRow;
+		slot: SessionSlot;
+		task?: { goalId: string; taskId: string; status?: string };
+	}> {
 		const registry = getSessionRegistry();
 		if (!registry) return this._sessionPool.list().map((slot) => ({ slot }));
 		return registry.activeRows().map((row) => {
 			const slot = this._sessionPool.findBySessionId(row.session_id);
 			if (!slot) throw new Error(`Session registry active row has no live slot: ${row.session_id}`);
-			return { row, slot };
+			const assignment = this.getSessionAssignment(row.session_id);
+			return {
+				row,
+				slot,
+				task: assignment
+					? {
+							goalId: assignment.goalId,
+							taskId: assignment.taskId,
+							status: readTask(this.associationRoot(), assignment.goalId, assignment.taskId).status,
+						}
+					: undefined,
+			};
 		});
 	}
 
@@ -1351,6 +1487,7 @@ export class AgentSessionRuntime {
 		if (!slot) return false;
 		if (slot.session.sessionManager.getSessionId() === getSessionRegistry()?.canonicalControlSessionId())
 			return false;
+		if (slot.activity.busy) this.suppressExecutorSettlement.add(slot.session.sessionManager.getSessionId());
 		if (this._sessionPool.list().length === 1) return false;
 		const wasForeground = slot.id === this._sessionPool.foregroundSlotId;
 		if (wasForeground) {

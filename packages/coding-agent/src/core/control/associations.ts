@@ -1,14 +1,16 @@
 import { existsSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
-import { getPiRoot } from "../pi-root.ts";
+import { dirname, join } from "node:path";
+import { getPiRoot, getPiRootRuntimeDir } from "../pi-root.ts";
 import { SessionManager } from "../session-manager.ts";
-import { readGoal, readTask, resolveControlDirectory } from "./read-model.ts";
+import { getSessionRegistry } from "../session-registry.ts";
+import { readGoal, readTask } from "./read-model.ts";
 
 export interface CurrentAssignment {
 	readonly goalId: string;
 	readonly taskId: string;
 	readonly sessionId: string;
 	readonly assignedAt: string;
+	readonly generation: number;
 }
 
 export type AssociationEventType = "assigned" | "unassigned";
@@ -96,7 +98,9 @@ function enqueueMutation<T>(path: string, operation: () => T | Promise<T>): Prom
 
 function associationPath(piRoot: string): string {
 	try {
-		return join(resolveControlDirectory(piRoot), "assignments.json");
+		const runtimeDir = getPiRootRuntimeDir(piRoot);
+		if (!runtimeDir) throw new Error("PiRoot has no formal runtime directory");
+		return join(runtimeDir, "assignments.json");
 	} catch (error) {
 		throw new AssociationError(`Invalid control directory: ${String(error)}`);
 	}
@@ -126,12 +130,18 @@ function timestampField(value: Record<string, unknown>, key: string, label: stri
 
 function parseCurrent(value: unknown, index: number): CurrentAssignment {
 	if (!isRecord(value)) throw new AssociationError(`Invalid current assignment at index ${index}`);
-	exactKeys(value, ["goalId", "taskId", "sessionId", "assignedAt"], `current[${index}]`);
+	exactKeys(value, ["goalId", "taskId", "sessionId", "assignedAt", "generation"], `current[${index}]`);
 	return {
 		goalId: stringField(value, "goalId", `current[${index}]`),
 		taskId: stringField(value, "taskId", `current[${index}]`),
 		sessionId: stringField(value, "sessionId", `current[${index}]`),
 		assignedAt: timestampField(value, "assignedAt", `current[${index}]`),
+		generation:
+			typeof value.generation === "number" && Number.isSafeInteger(value.generation) && value.generation > 0
+				? value.generation
+				: (() => {
+						throw new AssociationError(`Invalid current[${index}].generation`);
+					})(),
 	};
 }
 
@@ -153,6 +163,12 @@ function validateData(piRoot: string, data: AssociationData): AssociationData {
 	if (data.version !== 1) throw new AssociationError(`Unknown association schema version: ${String(data.version)}`);
 	const taskKeys = new Set<string>();
 	const sessionKeys = new Set<string>();
+	const lastGeneration = new Map<string, number>();
+	for (const event of data.history) {
+		if (event.type !== "assigned") continue;
+		const key = `${event.goalId}\u0000${event.taskId}`;
+		lastGeneration.set(key, (lastGeneration.get(key) ?? 0) + 1);
+	}
 	for (const assignment of data.current) {
 		const taskKey = `${assignment.goalId}\u0000${assignment.taskId}`;
 		if (taskKeys.has(taskKey))
@@ -161,6 +177,10 @@ function validateData(piRoot: string, data: AssociationData): AssociationData {
 			throw new AssociationError(`Duplicate current Session: ${assignment.sessionId}`);
 		taskKeys.add(taskKey);
 		sessionKeys.add(assignment.sessionId);
+		if (assignment.generation !== lastGeneration.get(taskKey))
+			throw new AssociationError(
+				`Current assignment generation is inconsistent: ${assignment.goalId}/${assignment.taskId}`,
+			);
 		validateReference(piRoot, assignment.goalId, assignment.taskId, assignment.sessionId);
 		if (
 			!data.history.some(
@@ -183,7 +203,12 @@ function validateReference(piRoot: string, goalId: string, taskId: string, sessi
 	try {
 		readGoal(piRoot, goalId);
 		readTask(piRoot, goalId, taskId);
-		if (!SessionManager.findById(piRoot, sessionId)) throw new Error(`durable Session not found: ${sessionId}`);
+		const runtimeDir = getPiRootRuntimeDir(piRoot);
+		const sessionFile = runtimeDir
+			? SessionManager.findById(piRoot, sessionId, join(runtimeDir, "sessions"))
+			: undefined;
+		if (!sessionFile && !SessionManager.findById(piRoot, sessionId))
+			throw new Error(`durable Session not found: ${sessionId}`);
 	} catch (error) {
 		throw new AssociationError(`Invalid association reference ${goalId}/${taskId}/${sessionId}: ${String(error)}`);
 	}
@@ -238,7 +263,7 @@ function sameBytes(left: Buffer | undefined, right: Buffer | undefined): boolean
 }
 
 function replaceAssociations(
-	piRoot: string,
+	_piRoot: string,
 	path: string,
 	data: AssociationData,
 	expected: Buffer | undefined,
@@ -247,7 +272,7 @@ function replaceAssociations(
 	const current = rawFile(path);
 	if (checkExpected && !sameBytes(expected, current)) throw new AssociationConcurrentModificationError(path);
 	const content = `${JSON.stringify(data, null, 2)}\n`;
-	const temporary = join(resolveControlDirectory(piRoot), `.assignments.json.${process.pid}.${Date.now()}.tmp`);
+	const temporary = join(dirname(path), `.assignments.json.${process.pid}.${Date.now()}.tmp`);
 	try {
 		writeFileSync(temporary, content, { encoding: "utf8", flag: "wx" });
 		if (mutationHooks.failRename) throw new Error("Injected association rename failure");
@@ -275,8 +300,17 @@ function currentForTask(record: AssociationRecord, goalId: string, taskId: strin
 function validateMutationIdentity(piRoot: string, goalId: string, taskId: string, sessionId?: string): void {
 	readGoal(piRoot, goalId);
 	readTask(piRoot, goalId, taskId);
-	if (sessionId !== undefined && !SessionManager.findById(piRoot, sessionId))
-		throw new AssociationError(`Durable Session not found: ${sessionId}`);
+	if (sessionId !== undefined) {
+		const runtimeDir = getPiRootRuntimeDir(piRoot);
+		const sessionFile = runtimeDir
+			? SessionManager.findById(piRoot, sessionId, join(runtimeDir, "sessions"))
+			: undefined;
+		if (!sessionFile && !SessionManager.findById(piRoot, sessionId))
+			throw new AssociationError(`Durable Session not found: ${sessionId}`);
+		const registry = getSessionRegistry();
+		if (registry?.canonicalControlSessionId() === sessionId)
+			throw new AssociationError(`Canonical Controller cannot be assigned as an Executor: ${sessionId}`);
+	}
 }
 
 function commitMutation(
@@ -296,46 +330,55 @@ export function assignTaskToSession(
 	sessionId: string,
 ): Promise<AssociationMutationResult> {
 	const path = associationPath(piRoot);
-	return enqueueMutation(path, () => {
-		validateMutationIdentity(piRoot, goalId, taskId, sessionId);
-		const base = mutationBase(piRoot);
-		const existing = currentForTask(base.record, goalId, taskId);
-		if (existing?.sessionId === sessionId) return { changed: false, record: base.record };
-		if (existing) throw new AssociationConflictError(`Task is already assigned: ${goalId}/${taskId}`);
-		const occupied = base.record.current.find((assignment) => assignment.sessionId === sessionId);
-		if (occupied) throw new AssociationConflictError(`Session is already assigned: ${sessionId}`);
-		const at = associationNow();
-		return {
-			changed: true,
-			record: commitMutation(piRoot, base, {
-				version: 1,
-				current: [...base.record.current, { goalId, taskId, sessionId, assignedAt: at }],
-				history: [...base.record.history, { goalId, taskId, sessionId, type: "assigned", at }],
-			}),
-		};
-	});
+	return enqueueMutation(path, () => assignTaskToSessionLocked(piRoot, goalId, taskId, sessionId));
+}
+
+export function assignTaskToSessionLocked(
+	piRoot: string,
+	goalId: string,
+	taskId: string,
+	sessionId: string,
+): AssociationMutationResult {
+	validateMutationIdentity(piRoot, goalId, taskId, sessionId);
+	const base = mutationBase(piRoot);
+	const existing = currentForTask(base.record, goalId, taskId);
+	if (existing?.sessionId === sessionId) return { changed: false, record: base.record };
+	if (existing) throw new AssociationConflictError(`Task is already assigned: ${goalId}/${taskId}`);
+	const occupied = base.record.current.find((assignment) => assignment.sessionId === sessionId);
+	if (occupied) throw new AssociationConflictError(`Session is already assigned: ${sessionId}`);
+	const at = associationNow();
+	const generation =
+		base.record.history.filter(
+			(event) => event.goalId === goalId && event.taskId === taskId && event.type === "assigned",
+		).length + 1;
+	return {
+		changed: true,
+		record: commitMutation(piRoot, base, {
+			version: 1,
+			current: [...base.record.current, { goalId, taskId, sessionId, assignedAt: at, generation }],
+			history: [...base.record.history, { goalId, taskId, sessionId, type: "assigned", at }],
+		}),
+	};
 }
 
 export function unassignTask(piRoot: string, goalId: string, taskId: string): Promise<AssociationMutationResult> {
-	const path = associationPath(piRoot);
-	return enqueueMutation(path, () => {
-		validateMutationIdentity(piRoot, goalId, taskId);
-		const base = mutationBase(piRoot);
-		const existing = currentForTask(base.record, goalId, taskId);
-		if (!existing) return { changed: false, record: base.record };
-		const at = associationNow();
-		return {
-			changed: true,
-			record: commitMutation(piRoot, base, {
-				version: 1,
-				current: base.record.current.filter((assignment) => assignment !== existing),
-				history: [
-					...base.record.history,
-					{ goalId, taskId, sessionId: existing.sessionId, type: "unassigned", at },
-				],
-			}),
-		};
-	});
+	return withAssociationMutationLock(piRoot, () => unassignTaskLocked(piRoot, goalId, taskId));
+}
+
+export function unassignTaskLocked(piRoot: string, goalId: string, taskId: string): AssociationMutationResult {
+	validateMutationIdentity(piRoot, goalId, taskId);
+	const base = mutationBase(piRoot);
+	const existing = currentForTask(base.record, goalId, taskId);
+	if (!existing) return { changed: false, record: base.record };
+	const at = associationNow();
+	return {
+		changed: true,
+		record: commitMutation(piRoot, base, {
+			version: 1,
+			current: base.record.current.filter((assignment) => assignment !== existing),
+			history: [...base.record.history, { goalId, taskId, sessionId: existing.sessionId, type: "unassigned", at }],
+		}),
+	};
 }
 
 export function reassignTaskToSession(
@@ -353,23 +396,37 @@ export function reassignTaskToSession(
 		if (existing.sessionId === newSessionId) return { changed: false, record: base.record };
 		const occupied = base.record.current.find((assignment) => assignment.sessionId === newSessionId);
 		if (occupied) throw new AssociationConflictError(`Session is already assigned: ${newSessionId}`);
-		const at = associationNow();
-		return {
-			changed: true,
-			record: commitMutation(piRoot, base, {
-				version: 1,
-				current: [
-					...base.record.current.filter((assignment) => assignment !== existing),
-					{ goalId, taskId, sessionId: newSessionId, assignedAt: at },
-				],
-				history: [
-					...base.record.history,
-					{ goalId, taskId, sessionId: existing.sessionId, type: "unassigned", at },
-					{ goalId, taskId, sessionId: newSessionId, type: "assigned", at },
-				],
-			}),
-		};
+		return replaceAssignment(piRoot, base, existing, newSessionId);
 	});
+}
+
+function replaceAssignment(
+	piRoot: string,
+	base: { path: string; record: AssociationRecord; bytes: Buffer | undefined },
+	existing: CurrentAssignment,
+	newSessionId: string,
+): AssociationMutationResult {
+	const { goalId, taskId } = existing;
+	const at = associationNow();
+	const generation =
+		base.record.history.filter(
+			(event) => event.goalId === goalId && event.taskId === taskId && event.type === "assigned",
+		).length + 1;
+	return {
+		changed: true,
+		record: commitMutation(piRoot, base, {
+			version: 1,
+			current: [
+				...base.record.current.filter((assignment) => assignment !== existing),
+				{ goalId, taskId, sessionId: newSessionId, assignedAt: at, generation },
+			],
+			history: [
+				...base.record.history,
+				{ goalId, taskId, sessionId: existing.sessionId, type: "unassigned", at },
+				{ goalId, taskId, sessionId: newSessionId, type: "assigned", at },
+			],
+		}),
+	};
 }
 
 export function getTaskAssignment(

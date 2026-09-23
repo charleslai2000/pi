@@ -8,7 +8,7 @@
  *   - the current foreground session cwd
  *   - `git rev-parse --show-toplevel` (a PiRoot may or may not be a Git repo)
  *
- * A directory qualifies as a PiRoot when it contains a `control/` directory.
+ * A directory qualifies as a formal PiRoot when it contains both `.pi/` runtime state and `control/` Task authority.
  */
 
 import { existsSync, realpathSync, statSync } from "node:fs";
@@ -16,7 +16,7 @@ import { dirname, isAbsolute, join, resolve as nodeResolvePath, relative, sep } 
 
 /** Marker directory that identifies a PiRoot. */
 export const PI_ROOT_MARKER = ".pi";
-export const LEGACY_PI_ROOT_MARKER = "control";
+export const PI_ROOT_CONTROL_DIR = "control";
 
 /** Thrown when PiRoot cannot be resolved. */
 export class PiRootNotFoundError extends Error {
@@ -47,7 +47,7 @@ export class PiRootPathError extends Error {
 	}
 }
 
-export type PiRootMode = "formal" | "legacy";
+export type PiRootMode = "formal";
 
 export interface PiRootResolution {
 	root: string;
@@ -68,9 +68,9 @@ export function getPiRoot(): string | undefined {
 }
 
 /** Set the process-level PiRoot. Passing `undefined` clears it. */
-export function setPiRoot(root: string | undefined, mode?: PiRootMode): void {
+export function setPiRoot(root: string | undefined, _mode?: PiRootMode): void {
 	activePiRoot = root === undefined ? undefined : canonicalizePath(root);
-	activePiRootMode = root === undefined ? undefined : (mode ?? (hasPiRootMarker(activePiRoot!) ? "formal" : "legacy"));
+	activePiRootMode = root === undefined ? undefined : "formal";
 }
 
 export function getPiRootMode(): PiRootMode | undefined {
@@ -118,19 +118,19 @@ export function hasPiRootMarker(dir: string): boolean {
 	return isDirectory(join(dir, PI_ROOT_MARKER));
 }
 
-/** True when `dir` contains the legacy `control/` marker. */
-export function hasLegacyPiRootMarker(dir: string): boolean {
-	return isDirectory(join(dir, LEGACY_PI_ROOT_MARKER));
+/** True when `dir` contains the human-readable Task authority directory. */
+export function hasControlDirectory(dir: string): boolean {
+	return isDirectory(join(dir, PI_ROOT_CONTROL_DIR));
 }
 
 /**
  * Walk from `startCwd` toward the filesystem root and return the nearest
- * ancestor containing `control/`.
+ * formal ancestor containing `.pi/` and `control/`.
  */
 export function findPiRootFromCwd(startCwd: string): string | undefined {
 	let current = canonicalizeAllowMissing(startCwd);
 	for (;;) {
-		if (hasPiRootMarker(current)) return current;
+		if (hasPiRootMarker(current) && hasControlDirectory(current)) return current;
 		const parent = dirname(current);
 		if (parent === current) return undefined;
 		current = parent;
@@ -141,27 +141,15 @@ export function findPiRootFromCwd(startCwd: string): string | undefined {
  * Resolve PiRoot.
  *
  * Order:
- *   1. Explicit `--root <path>` (must contain `control/`).
- *   2. Nearest ancestor of `cwd` containing `control/`.
+ *   1. Explicit `--root <path>` (must contain `.pi/` and `control/`).
+ *   2. Nearest formal ancestor of `cwd`.
  *   3. Failure.
  */
 export function resolvePiRootInfo(options: { explicitRoot?: string; cwd: string }): PiRootResolution {
 	const explicit = options.explicitRoot !== undefined && options.explicitRoot !== "";
 	const root = explicit ? canonicalizeAllowMissing(options.explicitRoot!) : findPiRootFromCwd(options.cwd);
-	if (root !== undefined && hasPiRootMarker(root)) {
-		return { root, controlDir: canonicalizePath(join(root, PI_ROOT_MARKER)), mode: "formal" };
-	}
-	if (explicit && root !== undefined && hasLegacyPiRootMarker(root)) {
-		return { root, controlDir: canonicalizePath(join(root, LEGACY_PI_ROOT_MARKER)), mode: "legacy" };
-	}
-	let current = canonicalizeAllowMissing(options.cwd);
-	for (;;) {
-		if (hasLegacyPiRootMarker(current)) {
-			return { root: current, controlDir: canonicalizePath(join(current, LEGACY_PI_ROOT_MARKER)), mode: "legacy" };
-		}
-		const parent = dirname(current);
-		if (parent === current) break;
-		current = parent;
+	if (root !== undefined && hasPiRootMarker(root) && hasControlDirectory(root)) {
+		return { root, controlDir: canonicalizePath(join(root, PI_ROOT_CONTROL_DIR)), mode: "formal" };
 	}
 	throw new PiRootNotFoundError(explicit ? { explicitRoot: options.explicitRoot } : { searchedFrom: options.cwd });
 }
@@ -234,8 +222,29 @@ export function resolvePiRootRelativePath(input: string, root: string | undefine
 /** Derive a short display label for a path relative to PiRoot. */
 export function getPiRootControlCwd(root: string | undefined = activePiRoot): string | undefined {
 	if (root === undefined) return undefined;
-	const formal = join(root, PI_ROOT_MARKER);
-	return canonicalizePath(existsSync(formal) ? formal : join(root, LEGACY_PI_ROOT_MARKER));
+	return canonicalizePath(join(root, PI_ROOT_CONTROL_DIR));
+}
+
+export function getPiRootRuntimeDir(root: string | undefined = activePiRoot): string | undefined {
+	if (root === undefined) return undefined;
+	return canonicalizePath(join(root, PI_ROOT_MARKER));
+}
+
+export function assertManagedControlMutationAllowed(target: string): void {
+	const root = activePiRoot;
+	if (!root) return;
+	const control = getPiRootControlDir(root);
+	const runtime = getPiRootRuntimeDir(root);
+	if (!control || !runtime) return;
+	const candidate = canonicalizeAllowMissing(target);
+	const inControl =
+		isPathInsidePiRoot(candidate, control) &&
+		(relative(control, candidate) === "" || !relative(control, candidate).startsWith(`..${sep}`));
+	const inRuntime =
+		isPathInsidePiRoot(candidate, runtime) &&
+		(relative(runtime, candidate) === "" || !relative(runtime, candidate).startsWith(`..${sep}`));
+	if (inControl || inRuntime)
+		throw new PiRootPathError(`Managed Control Plane files must be changed through control tools: ${target}`, target);
 }
 
 export function getPiRootControlDir(root: string | undefined = activePiRoot): string | undefined {

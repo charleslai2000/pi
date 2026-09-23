@@ -3,6 +3,7 @@ import { mkdir as fsMkdir, writeFile as fsWriteFile } from "fs/promises";
 import { dirname } from "path";
 import { type Static, Type } from "typebox";
 import type { ExtensionContext, ToolDefinition } from "../extensions/types.ts";
+import { assertManagedControlMutationAllowed } from "../pi-root.ts";
 import { withFileMutationQueue } from "./file-mutation-queue.ts";
 import { resolveToCwd } from "./path-utils.ts";
 import { writeRenderers } from "./renderers/write.ts";
@@ -63,6 +64,7 @@ export function createWriteToolDefinition(
 			ctx?: ExtensionContext,
 		) {
 			const absolutePath = resolveToCwd(path, ctx?.cwd || cwd);
+			assertManagedControlMutationAllowed(absolutePath);
 			const dir = dirname(absolutePath);
 			return withFileMutationQueue(absolutePath, async () => {
 				// Do not reject from an abort event listener here: that would release the

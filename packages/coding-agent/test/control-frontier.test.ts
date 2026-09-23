@@ -77,7 +77,7 @@ describe("control frontier read/write model", () => {
 
 	it("reports a missing control directory", () => {
 		const root = mkdtempSync(join("/tmp", "pi-frontier-no-control-"));
-		setPiRoot(root, "legacy");
+		setPiRoot(root, "formal");
 		expect(() => readFrontier(root)).toThrow(FrontierError);
 		expect(() => writeFrontier(root, [])).toThrow(FrontierError);
 		expect(existsSync(join(root, "control"))).toBe(false);

@@ -1,5 +1,6 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { afterEach, describe, expect, it } from "vitest";
 import { AgentSessionRuntime } from "../src/core/agent-session-runtime.ts";
 import { readAssociations } from "../src/core/control/associations.ts";
@@ -13,6 +14,8 @@ class FakeSession {
 	readonly sessionManager = { getSessionId: () => this.id, getSessionName: () => this.id };
 	readonly tools = new Map<string, { execute: (id: string, params: unknown) => Promise<unknown> }>();
 	activeTools: string[] = [];
+	messages: AgentMessage[] = [];
+	isIdle = true;
 	prompts: string[] = [];
 	isStreaming = false;
 	contextUsage: { tokens: number | null; contextWindow: number; percent: number | null } | undefined = {
@@ -53,6 +56,9 @@ class FakeSession {
 	async prompt(message: string): Promise<void> {
 		this.prompts.push(message);
 	}
+	async sendCustomMessage(message: { content: string | unknown[] }): Promise<void> {
+		this.prompts.push(typeof message.content === "string" ? message.content : JSON.stringify(message.content));
+	}
 	async steer(message: string): Promise<void> {
 		this.prompts.push(message);
 	}
@@ -70,10 +76,11 @@ function setup(): {
 	executor2: FakeSession;
 } {
 	const root = mkdtempSync(join("/tmp", "pi-controller-tools-"));
+	mkdirSync(join(root, ".pi"), { recursive: true });
 	const taskDir = join(root, "control", "goal-a", "tasks");
 	mkdirSync(taskDir, { recursive: true });
 	writeFileSync(join(root, "control", "goal-a", "goal.md"), "# Goal A\n");
-	setPiRoot(root, "legacy");
+	setPiRoot(root, "formal");
 	const registry = new SessionRegistry(root);
 	setSessionRegistryForTesting(registry);
 	const sessionDir = getDefaultSessionDir(root);
@@ -116,6 +123,9 @@ function setup(): {
 		_sessionPool: pool,
 		taskSessionBindings: new Map(),
 		taskSessionAdmission: new Map(),
+		taskRunGenerations: new Map(),
+		controllerNoticeKeys: new Set(),
+		suppressExecutorSettlement: new Set(),
 		createRuntime: async () => {
 			throw new Error("test does not create a new Executor");
 		},
@@ -216,7 +226,18 @@ describe("Controller Task/Executor tools", () => {
 		expect(value.executor.prompts.at(-1)).toContain("Continue and decide");
 		await call(value.executor, "task_gate", { decision: "accept" });
 		value.controller.isStreaming = true;
-		await call(value.executor, "task_result", { outcome: "terminated", result: "partial", remaining: "continue" });
+		value.executor.messages.push({
+			role: "assistant",
+			content: [
+				{
+					type: "text",
+					text: '<pi-executor-stop>{"reason":"terminated","result":"partial","remaining":"continue"}</pi-executor-stop>',
+				},
+			],
+			stopReason: "stop",
+		} as AgentMessage);
+		value.executor.emit("agent_settled");
+		await new Promise((resolve) => setImmediate(resolve));
 		expect(value.controller.prompts.at(-1)).toContain("status=DEFERRED");
 		expect(readTask(value.root, "goal-a", "T001").status).toBe("DEFERRED");
 		await call(value.controller, "dispatch_task", { goalId: "goal-a", taskId: "T001", sessionId: "executor2" });

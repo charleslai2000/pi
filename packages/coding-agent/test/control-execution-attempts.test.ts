@@ -23,7 +23,7 @@ function fixture(): { root: string; sessionId: string; taskPath: string } {
 	writeFileSync(join(root, "control", "goal-a", "goal.md"), "# Goal A\n");
 	const taskPath = join(taskDir, "T001-work.md");
 	writeFileSync(taskPath, "Status: ACTIVE\nObjective: do work\n");
-	setPiRoot(root, "legacy");
+	setPiRoot(root, "formal");
 	const sessionId = "session-a";
 	const sessionDir = getDefaultSessionDir(root);
 	const cwd = join(root, "work");

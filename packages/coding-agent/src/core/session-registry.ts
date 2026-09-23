@@ -4,10 +4,17 @@ import { hostname } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { canonicalizePath } from "../utils/paths.ts";
-import { getPiRoot, getPiRootControlDir } from "./pi-root.ts";
+import { readAssociations } from "./control/associations.ts";
+import {
+	getPiRoot,
+	getPiRootControlDir,
+	getPiRootRuntimeDir,
+	hasControlDirectory,
+	hasPiRootMarker,
+} from "./pi-root.ts";
 import { type SessionInfo, SessionManager } from "./session-manager.ts";
 
-export type SessionRegistryRole = "control" | "unassigned";
+export type SessionRegistryRole = "controller" | "executor" | "unassigned";
 export type SessionRegistryRuntimeState = "active" | "inactive";
 export interface RegistryRow {
 	session_id: string;
@@ -42,14 +49,13 @@ let registry: SessionRegistry | undefined;
 function now(): number {
 	return Date.now();
 }
-function registryPath(controlDir: string): string {
-	return join(controlDir, "state", "control.sqlite3");
+function registryPath(runtimeDir: string): string {
+	return join(runtimeDir, "state", "control.sqlite3");
 }
-function ensurePiGitignore(controlDir: string): void {
-	mkdirSync(join(controlDir, "state"), { recursive: true });
-	const file = join(controlDir, ".gitignore");
-	if (!existsSync(file))
-		writeFileSync(file, "state/control.sqlite3\nstate/control.sqlite3-wal\nstate/control.sqlite3-shm\n");
+function ensurePiRuntime(runtimeDir: string): void {
+	mkdirSync(join(runtimeDir, "state"), { recursive: true });
+	const file = join(runtimeDir, ".gitignore");
+	if (!existsSync(file)) writeFileSync(file, "state/\nsessions/\n");
 }
 
 export class SessionRegistry {
@@ -66,11 +72,14 @@ export class SessionRegistry {
 		this.heartbeatIntervalMs = options.heartbeatIntervalMs ?? 10_000;
 		this.staleAfterMs = options.staleAfterMs ?? 30_000;
 		this.root = canonicalizePath(root);
+		if (!hasPiRootMarker(this.root) || !hasControlDirectory(this.root))
+			throw new Error(`PiRoot has no formal .pi/ and control/ layout: ${this.root}`);
 		const controlDir = getPiRootControlDir(this.root);
-		if (!controlDir) throw new Error(`PiRoot has no control directory: ${this.root}`);
-		ensurePiGitignore(controlDir);
-		this.db = new DatabaseSync(registryPath(controlDir));
-		this.db.exec("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;");
+		const runtimeDir = getPiRootRuntimeDir(this.root);
+		if (!controlDir || !runtimeDir) throw new Error(`PiRoot has no formal runtime/control layout: ${this.root}`);
+		ensurePiRuntime(runtimeDir);
+		this.db = new DatabaseSync(registryPath(runtimeDir));
+		this.db.exec("PRAGMA busy_timeout=5000;");
 		this.db.exec(`CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS runtime_instances (
  instance_id TEXT PRIMARY KEY, pid INTEGER NOT NULL, hostname TEXT NOT NULL,
@@ -79,13 +88,16 @@ CREATE TABLE IF NOT EXISTS runtime_instances (
 );
 CREATE TABLE IF NOT EXISTS sessions (
  session_id TEXT PRIMARY KEY, session_file TEXT UNIQUE, cwd TEXT NOT NULL, name TEXT,
- role TEXT NOT NULL CHECK(role IN ('control','unassigned')),
+ role TEXT NOT NULL CHECK(role IN ('controller','executor','unassigned')),
  runtime_state TEXT NOT NULL CHECK(runtime_state IN ('active','inactive')),
  runtime_instance_id TEXT REFERENCES runtime_instances(instance_id),
  last_seen_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
 );`);
+		this.db.exec("PRAGMA foreign_keys=ON;");
 		this.migrateSessions();
-		this.db.prepare("INSERT OR REPLACE INTO meta(key,value) VALUES('schema_version','3')").run();
+		this.migrateRoleConstraint();
+		this.db.exec("PRAGMA journal_mode=WAL;");
+		this.db.prepare("INSERT OR REPLACE INTO meta(key,value) VALUES('schema_version','4')").run();
 		this.db.prepare("INSERT OR REPLACE INTO meta(key,value) VALUES('pi_root',?)").run(this.root);
 		this.instance = {
 			instance_id: randomUUID(),
@@ -108,6 +120,54 @@ CREATE TABLE IF NOT EXISTS sessions (
 		this.db.exec(
 			"CREATE INDEX IF NOT EXISTS sessions_active_instance ON sessions(runtime_state, runtime_instance_id)",
 		);
+	}
+
+	private migrateRoleConstraint(): void {
+		const schema = this.db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='sessions'").get() as
+			| { sql?: string }
+			| undefined;
+		if (schema?.sql?.includes("'controller','executor','unassigned'")) return;
+		const hasLegacyRoleCheck = schema?.sql?.includes("'control','unassigned'") ?? false;
+		if (!hasLegacyRoleCheck) throw new Error("Unrecognized SessionRegistry role constraint");
+
+		this.db.exec("BEGIN IMMEDIATE");
+		try {
+			const canonicalId = this.canonicalControlSessionId();
+			const assignments = readAssociations(this.root).current;
+			const assignmentIds = new Set(assignments.map((assignment) => assignment.sessionId));
+			if (canonicalId && assignmentIds.has(canonicalId))
+				throw new Error(`Session ${canonicalId} is both canonical Controller and assigned Executor`);
+			this.db.exec(`
+CREATE TABLE sessions_formal (
+ session_id TEXT PRIMARY KEY, session_file TEXT UNIQUE, cwd TEXT NOT NULL, name TEXT,
+ role TEXT NOT NULL CHECK(role IN ('controller','executor','unassigned')),
+ runtime_state TEXT NOT NULL CHECK(runtime_state IN ('active','inactive')),
+ runtime_instance_id TEXT REFERENCES runtime_instances(instance_id),
+ last_seen_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+);
+INSERT INTO sessions_formal(session_id,session_file,cwd,name,role,runtime_state,runtime_instance_id,last_seen_at,updated_at)
+SELECT session_id,session_file,cwd,name,'unassigned',runtime_state,runtime_instance_id,last_seen_at,updated_at FROM sessions;
+DROP TABLE sessions;
+ALTER TABLE sessions_formal RENAME TO sessions;
+CREATE INDEX sessions_active_instance ON sessions(runtime_state, runtime_instance_id);
+`);
+			const updateRole = this.db.prepare("UPDATE sessions SET role=? WHERE session_id=?");
+			for (const row of this.db.prepare("SELECT session_id FROM sessions").all() as Array<{ session_id: string }>) {
+				const role =
+					row.session_id === canonicalId
+						? "controller"
+						: assignmentIds.has(row.session_id)
+							? "executor"
+							: "unassigned";
+				if (row.session_id === canonicalId && assignmentIds.has(row.session_id))
+					throw new Error(`Session ${row.session_id} is both canonical Controller and assigned Executor`);
+				updateRole.run(role, row.session_id);
+			}
+			this.db.exec("COMMIT");
+		} catch (error) {
+			this.db.exec("ROLLBACK");
+			throw error;
+		}
 	}
 
 	private acquire(): void {
@@ -178,14 +238,39 @@ CREATE TABLE IF NOT EXISTS sessions (
 VALUES(?,?,?,?,?,'inactive',NULL,?,?) ON CONFLICT(session_id) DO UPDATE SET session_file=excluded.session_file,cwd=excluded.cwd,name=excluded.name,role=excluded.role,runtime_state='inactive',runtime_instance_id=NULL,last_seen_at=excluded.last_seen_at,updated_at=excluded.updated_at`);
 		this.db.exec("BEGIN IMMEDIATE");
 		try {
-			for (const row of rows) {
+			const recoveredRows = new Map(rows.map((row) => [row.id, row]));
+			const runtimeDir = getPiRootRuntimeDir(this.root);
+			if (!runtimeDir) throw new Error(`PiRoot has no runtime directory: ${this.root}`);
+			const sessionDir = join(runtimeDir, "sessions");
+			for (const assignment of readAssociations(this.root).current) {
+				if (assignment.sessionId === this.canonicalControlSessionId()) continue;
+				if (recoveredRows.has(assignment.sessionId)) continue;
+				const sessionFile = SessionManager.findById(this.root, assignment.sessionId, sessionDir);
+				if (!sessionFile) throw new Error(`Assigned durable Session cannot be recovered: ${assignment.sessionId}`);
+				const manager = SessionManager.open(sessionFile);
+				if (manager.getSessionId() !== assignment.sessionId)
+					throw new Error(`Recovered Session identity mismatch for assignment: ${assignment.sessionId}`);
+				recoveredRows.set(assignment.sessionId, {
+					path: sessionFile,
+					id: manager.getSessionId(),
+					cwd: manager.getCwd(),
+					name: manager.getSessionName(),
+					created: new Date(0),
+					modified: new Date(0),
+					messageCount: 0,
+					firstMessage: "",
+					allMessagesText: "",
+				});
+			}
+			for (const row of [...recoveredRows.values()].sort((left, right) => left.id.localeCompare(right.id))) {
 				const cwd = canonicalizePath(row.cwd);
+				const sessionFile = SessionManager.findById(this.root, row.id, sessionDir) ?? row.path;
 				upsert.run(
 					row.id,
-					canonicalizePath(row.path),
+					canonicalizePath(sessionFile),
 					cwd,
 					row.name ?? null,
-					this.roleFor(cwd),
+					this.roleFor(row.id, cwd),
 					timestamp,
 					timestamp,
 				);
@@ -204,13 +289,9 @@ VALUES(?,?,?,?,?,'inactive',NULL,?,?) ON CONFLICT(session_id) DO UPDATE SET sess
 		const existing = this.db.prepare("SELECT value FROM meta WHERE key='canonical_control_session_id'").get() as
 			| { value?: string }
 			| undefined;
-		if (
-			existing?.value &&
-			this.db.prepare("SELECT 1 FROM sessions WHERE session_id=? AND cwd=?").get(existing.value, controlDir)
-		)
-			return;
+		if (existing?.value && this.db.prepare("SELECT 1 FROM sessions WHERE session_id=?").get(existing.value)) return;
 		const candidate = this.db
-			.prepare("SELECT session_id FROM sessions WHERE cwd=? ORDER BY last_seen_at DESC LIMIT 1")
+			.prepare("SELECT session_id FROM sessions WHERE cwd=? ORDER BY last_seen_at DESC, session_id ASC LIMIT 1")
 			.get(controlDir) as { session_id?: string } | undefined;
 		if (candidate?.session_id)
 			this.db
@@ -258,11 +339,13 @@ VALUES(?,?,?,?,?,'inactive',NULL,?,?) ON CONFLICT(session_id) DO UPDATE SET sess
 	}
 
 	canonicalControlSessionId(): string | undefined {
-		return (
+		const stored = (
 			this.db.prepare("SELECT value FROM meta WHERE key='canonical_control_session_id'").get() as
 				| { value?: string }
 				| undefined
 		)?.value;
+		if (stored && this.db.prepare("SELECT 1 FROM sessions WHERE session_id=?").get(stored)) return stored;
+		return undefined;
 	}
 	setCanonicalControlSessionId(id: string): void {
 		this.db.prepare("INSERT OR REPLACE INTO meta(key,value) VALUES('canonical_control_session_id',?)").run(id);
@@ -279,16 +362,36 @@ VALUES(?,?,?,?,?,'active',?,?,?) ON CONFLICT(session_id) DO UPDATE SET session_f
 				session.file ? canonicalizePath(session.file) : null,
 				cwd,
 				session.name ?? null,
-				this.roleFor(cwd),
+				this.roleFor(session.id, cwd),
 				this.instance.instance_id,
 				timestamp,
 				timestamp,
 			);
-		if (this.roleFor(cwd) === "control" && !this.canonicalControlSessionId())
+		if (
+			this.roleFor(session.id, cwd) === "unassigned" &&
+			cwd === getPiRootControlDir(this.root) &&
+			!this.canonicalControlSessionId()
+		)
 			this.setCanonicalControlSessionId(session.id);
 	}
 	setName(id: string, name: string | undefined): void {
 		this.db.prepare("UPDATE sessions SET name=?,updated_at=? WHERE session_id=?").run(name ?? null, now(), id);
+	}
+
+	refreshRoles(): void {
+		const rows = this.db.prepare("SELECT * FROM sessions ORDER BY updated_at DESC").all() as unknown as RegistryRow[];
+		this.db.exec("BEGIN IMMEDIATE");
+		try {
+			for (const row of rows) {
+				this.db
+					.prepare("UPDATE sessions SET role=?,updated_at=? WHERE session_id=?")
+					.run(this.roleFor(row.session_id, row.cwd), now(), row.session_id);
+			}
+			this.db.exec("COMMIT");
+		} catch (error) {
+			this.db.exec("ROLLBACK");
+			throw error;
+		}
 	}
 	setFaults(faults: { nextDeactivate?: boolean; nextActivate?: boolean }): void {
 		this.failNextDeactivate = faults.nextDeactivate === true;
@@ -316,15 +419,30 @@ VALUES(?,?,?,?,?,'active',?,?,?) ON CONFLICT(session_id) DO UPDATE SET session_f
 	}
 	inactiveRows(): RegistryRow[] {
 		const canonical = this.canonicalControlSessionId();
+		const runtimeDir = getPiRootRuntimeDir(this.root);
 		return this.rows().filter(
-			(row) => row.runtime_state === "inactive" && row.role !== "control" && row.session_id !== canonical,
+			(row) =>
+				row.runtime_state === "inactive" &&
+				row.role !== "controller" &&
+				row.session_id !== canonical &&
+				row.cwd !== runtimeDir,
 		);
 	}
 	rows(): RegistryRow[] {
-		return this.db.prepare("SELECT * FROM sessions ORDER BY updated_at DESC").all() as unknown as RegistryRow[];
+		this.refreshRoles();
+		return this.db
+			.prepare("SELECT * FROM sessions ORDER BY last_seen_at DESC, session_id ASC")
+			.all() as unknown as RegistryRow[];
 	}
-	private roleFor(cwd: string): SessionRegistryRole {
-		return getPiRootControlDir(this.root) === cwd ? "control" : "unassigned";
+	private roleFor(sessionId: string, _cwd: string): SessionRegistryRole {
+		if (sessionId === this.canonicalControlSessionId()) {
+			const assignments = readAssociations(this.root);
+			if (assignments.current.some((assignment) => assignment.sessionId === sessionId))
+				throw new Error(`Session ${sessionId} is both canonical Controller and assigned Executor`);
+			return "controller";
+		}
+		const assignments = readAssociations(this.root);
+		return assignments.current.some((assignment) => assignment.sessionId === sessionId) ? "executor" : "unassigned";
 	}
 	close(): void {
 		if (this.closed) return;
@@ -355,7 +473,9 @@ export async function initializeSessionRegistry(
 		return registry;
 	}
 	registry = new SessionRegistry(canonicalRoot, options);
-	const rows = await SessionManager.listAll(options.sessionDir);
+	const runtimeDir = getPiRootRuntimeDir(canonicalRoot);
+	const sessionDir = options.sessionDir ?? (runtimeDir ? join(runtimeDir, "sessions") : undefined);
+	const rows = await SessionManager.listAll(sessionDir);
 	registry.rebuild(rows);
 	return registry;
 }

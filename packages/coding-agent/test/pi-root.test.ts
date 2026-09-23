@@ -33,6 +33,7 @@ function makeDir(...segments: string[]): string {
 /** Create a PiRoot: a directory containing a `control/` marker. */
 function makePiRoot(base: string, name: string): string {
 	const root = makeDir(base, name);
+	mkdirSync(join(root, ".pi"), { recursive: true });
 	mkdirSync(join(root, "control"), { recursive: true });
 	return root;
 }
@@ -71,7 +72,7 @@ describe("PiRoot resolution", () => {
 		setPiRoot(undefined);
 	});
 
-	it("resolves to the nearest ancestor containing control/", () => {
+	it("resolves to the nearest ancestor containing .pi/ and control/", () => {
 		const root = makePiRoot(base, "project");
 		const nested = makeDir(root, "design", "sub");
 		expect(resolvePiRoot({ cwd: nested })).toBe(root);
@@ -88,8 +89,9 @@ describe("PiRoot resolution", () => {
 		expect(resolvePiRoot({ explicitRoot: other, cwd: base })).toBe(other);
 	});
 
-	it("rejects an explicit --root without control/", () => {
+	it("rejects an explicit --root without .pi/", () => {
 		const plain = makeDir(base, "plain");
+		mkdirSync(join(plain, "control"));
 		expect(() => resolvePiRoot({ explicitRoot: plain, cwd: base })).toThrow(PiRootNotFoundError);
 	});
 
@@ -97,7 +99,7 @@ describe("PiRoot resolution", () => {
 		expect(() => resolvePiRoot({ explicitRoot: join(base, "nope"), cwd: base })).toThrow(PiRootNotFoundError);
 	});
 
-	it("throws when no ancestor contains control/", () => {
+	it("throws when no ancestor contains .pi/ and control/", () => {
 		const plain = makeDir(base, "plain", "deep");
 		expect(() => resolvePiRoot({ cwd: plain })).toThrow(PiRootNotFoundError);
 	});
@@ -290,7 +292,7 @@ describe("Legacy per-cwd history", () => {
 		setPiRoot(undefined);
 	});
 
-	it("legacy session inside PiRoot is visible, outside is not", async () => {
+	it("formal PiRoot discovery ignores legacy per-cwd sessions", async () => {
 		const insideDir = makeDir(root, "design");
 		const legacyInside = join(agentDir, "sessions", legacyDirName(insideDir));
 		writeSession(legacyInside, "legacy-inside", insideDir, 1);
@@ -303,11 +305,11 @@ describe("Legacy per-cwd history", () => {
 		setPiRoot(root);
 		const sessions = await SessionManager.list(root);
 		const ids = sessions.map((s) => s.id);
-		expect(ids).toContain("legacy-inside");
+		expect(ids).not.toContain("legacy-inside");
 		expect(ids).not.toContain("legacy-outside");
 	});
 
-	it("findById and continueRecent agree with list on legacy sessions", async () => {
+	it("formal PiRoot lookup does not use legacy session directories", async () => {
 		const insideDir = makeDir(root, "design");
 		const legacyDir = join(agentDir, "sessions", legacyDirName(insideDir));
 		writeSession(legacyDir, "legacy-consistency", insideDir, 1);
@@ -315,14 +317,12 @@ describe("Legacy per-cwd history", () => {
 		setPiRoot(root);
 		const listed = await SessionManager.list(root);
 		const found = SessionManager.findById(root, "legacy-consistency");
-		const continued = SessionManager.continueRecent(root);
 
-		expect(listed.map((s) => s.id)).toContain("legacy-consistency");
-		expect(found).toBeDefined();
-		expect(continued.getSessionFile()).toBeDefined();
+		expect(listed.map((s) => s.id)).not.toContain("legacy-consistency");
+		expect(found).toBeUndefined();
 	});
 
-	it("resuming a legacy session never appends to the legacy file and continues in the PiRoot namespace", () => {
+	it("legacy session files are never implicitly migrated by runtime open", () => {
 		const insideDir = makeDir(root, "design");
 		const legacyDir = join(agentDir, "sessions", legacyDirName(insideDir));
 		const legacyFile = writeSession(legacyDir, "legacy-migrate", insideDir, 2);
@@ -330,27 +330,9 @@ describe("Legacy per-cwd history", () => {
 
 		setPiRoot(root);
 		const session = SessionManager.open(legacyFile);
-
-		// Legacy file is byte-for-byte unchanged.
+		expect(session.getSessionFile()).toBe(legacyFile);
 		expect(readFileSync(legacyFile, "utf-8")).toBe(before);
-
-		// Continued session lives in the PiRoot namespace, not the legacy dir.
-		const activeFile = session.getSessionFile();
-		expect(activeFile).toBeDefined();
-		expect(activeFile!.startsWith(join(agentDir, "sessions"))).toBe(true);
-		expect(activeFile).not.toBe(legacyFile);
-		expect(legacyDirName(root)).toBe(
-			activeFile!.split("/sessions/")[1]!.slice(0, activeFile!.split("/sessions/")[1]!.indexOf("/")),
-		);
-
-		// History and lineage are preserved.
-		const lines = readFileSync(activeFile!, "utf-8")
-			.trim()
-			.split("\n")
-			.map((l) => JSON.parse(l));
-		expect(lines[0].cwd).toBe(insideDir);
-		expect(lines[0].parentSession).toBe(legacyFile);
-		expect(lines.filter((e: { type: string }) => e.type === "message").length).toBe(2);
+		expect(existsSync(join(agentDir, "sessions", legacyDirName(root)))).toBe(false);
 	});
 
 	it("a session already in the PiRoot namespace is opened in place", () => {

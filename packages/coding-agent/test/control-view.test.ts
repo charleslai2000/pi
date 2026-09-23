@@ -12,6 +12,7 @@ import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
 
 function fixture(): { root: string; sessionDir: string; sessionId: string } {
 	const root = mkdtempSync(join("/tmp", "pi-control-view-"));
+	mkdirSync(join(root, ".pi"), { recursive: true });
 	mkdirSync(join(root, "control", "goal-a", "tasks"), { recursive: true });
 	writeFileSync(join(root, "control", "goal-a", "goal.md"), "# Goal A\n");
 	writeFileSync(
@@ -25,7 +26,7 @@ function fixture(): { root: string; sessionDir: string; sessionId: string } {
 	mkdirSync(join(root, "control", "goal-c", "tasks"), { recursive: true });
 	writeFileSync(join(root, "control", "goal-c", "goal.md"), "# Goal C\n");
 	writeFileSync(join(root, "control", "goal-c", "tasks", "T002-work.md"), "Status: READY\n");
-	setPiRoot(root, "legacy");
+	setPiRoot(root, "formal");
 	const sessionId = "d1";
 	const sessionDir = getDefaultSessionDir(root);
 	const cwd = join(root, "design");
@@ -68,7 +69,13 @@ describe("combined control view", () => {
 		writeAssociations(value.root, {
 			version: 1,
 			current: [
-				{ goalId: "goal-a", taskId: "T001", sessionId: value.sessionId, assignedAt: "2026-01-01T00:00:00.000Z" },
+				{
+					goalId: "goal-a",
+					taskId: "T001",
+					sessionId: value.sessionId,
+					assignedAt: "2026-01-01T00:00:00.000Z",
+					generation: 1,
+				},
 			],
 			history: [
 				{

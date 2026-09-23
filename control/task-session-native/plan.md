@@ -3,19 +3,16 @@
 ## Established results
 - Accepted architecture is frozen in `design/architecture/task-session-native.md`.
 - Task.md is lifecycle SSOT and durable Task memory; an assigned long-lived Pi AgentSession is the Executor.
-- Added `startAssignedTask()` native bootstrap, removed `/execute` from the interactive normal surface, and added the system-prompt Task protocol seam.
-- Added controlled `Memory:` mutation and the `task_memory` tool name.
-- Added initial `task_gate` and `task_result` tool skeletons; lifecycle behavior is not yet acceptance-complete.
-- `executeAssignedTask()` and C4 execution runtime remain active and must be removed or demoted.
+- Native Executor lifecycle, run/assignment generation CAS, stop-envelope semantics, and stale-settle rejection passed `npm run check` and the requested focused regressions (8 files, 32 tests).
+- No current `task_result` protocol references remain in runtime source/tests/design.
 
 ## Decisive frontier
-Phase 1 native lifecycle closure is complete. No active implementation frontier remains under this Goal.
+Pi Control Plane runtime semantics and implementation/recovery are closed. OpenCodeX live service verification remains blocked by its external compiled routing preset mismatch; see `control/opencodex-formal-pi-root-migration/plan.md`. No Pi-side implementation dependency remains.
 
 ## Active tasks
-None.
+- None for Pi Control Plane implementation. OpenCodeX-owned live startup and any authorized GPT-6 continuation scope remain external.
 
 ## Result
-T001 is DONE. Native Executor admission, ACTIVE/BLOCKED settle/resume, Task memory/result tools, legacy execution runtime removal, and focused acceptance are complete. `execution-attempts.ts` is LEGACY-ONLY and not a runtime authority.
+`RUNTIME SEMANTICS CLOSURE = PASS`
 
-## Next action
-Stop. Any Controller tools, DAG/frontier, context budget, escalation, review, or scheduler work requires a separately authorized phase/Goal.
+Evidence: `npm run check`; association and lifecycle tests; integrated orchestration E2E; SessionRegistry/recovery and `/sessions` projection regressions passed together (8 files / 32 tests). Assignment generations derive monotonically from durable assignment history; stale settle after redispatch/new run is rejected without Task mutation or Controller notification. `continue_possible` remains ACTIVE and same-Session completion succeeds.

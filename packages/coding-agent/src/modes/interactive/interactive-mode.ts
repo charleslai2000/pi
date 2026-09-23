@@ -5575,7 +5575,14 @@ export class InteractiveMode {
 	private showLiveSessionSelector(): void {
 		this.showSelector((done) => {
 			const selector = new LiveSessionSelector(
-				this.runtimeHost.listActiveSessions().map(({ slot }) => slot),
+				this.runtimeHost.listActiveSessions().sort((a, b) => {
+					const rank = (role?: string, busy?: boolean) =>
+						role === "controller" ? 0 : role === "executor" ? (busy ? 1 : 2) : 3;
+					return (
+						rank(a.row?.role, a.slot.activity.busy) - rank(b.row?.role, b.slot.activity.busy) ||
+						(b.row?.updated_at ?? 0) - (a.row?.updated_at ?? 0)
+					);
+				}),
 				{
 					foregroundSlotId: this.runtimeHost.sessionPool.foregroundSlotId!,
 					onSwitch: async (slotId) => {

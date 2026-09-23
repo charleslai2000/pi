@@ -25,6 +25,7 @@ function makeProject(): { base: string; root: string; agentDir: string } {
 	const base = mkdtempSync(join("/tmp", "pi-root-process-"));
 	const root = join(base, "project");
 	mkdirSync(join(root, ".pi"), { recursive: true });
+	mkdirSync(join(root, "control"), { recursive: true });
 	mkdirSync(join(root, "design"), { recursive: true });
 	return { base, root, agentDir: join(base, "agent") };
 }

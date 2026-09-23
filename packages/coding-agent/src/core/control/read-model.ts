@@ -54,8 +54,6 @@ function canonical(path: string): string {
 
 function controlDirectory(piRoot: string): string {
 	const root = canonical(piRoot);
-	const legacy = join(root, "control");
-	if (existsSync(legacy) && statSync(legacy).isDirectory()) return canonical(legacy);
 	const resolved = getPiRootControlDir(root);
 	if (!resolved || !existsSync(resolved) || !statSync(resolved).isDirectory())
 		throw new ControlReadError(`PiRoot has no control directory: ${root}`);

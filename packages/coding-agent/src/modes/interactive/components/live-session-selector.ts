@@ -1,6 +1,13 @@
 import type { Component } from "@earendil-works/pi-tui";
 import type { SessionSlot } from "../../../core/session-pool.ts";
+import type { RegistryRow } from "../../../core/session-registry.ts";
 import { theme } from "../theme/theme.ts";
+
+export interface LiveSessionDisplay {
+	slot: SessionSlot;
+	row?: RegistryRow;
+	task?: { goalId: string; taskId: string; status?: string };
+}
 
 export interface LiveSessionSelectorOptions {
 	foregroundSlotId: string;
@@ -12,17 +19,17 @@ export interface LiveSessionSelectorOptions {
 
 /** Minimal selector for already-live session slots. It never reads session files from disk. */
 export class LiveSessionSelector implements Component {
-	private readonly slots: readonly SessionSlot[];
+	private readonly slots: readonly LiveSessionDisplay[];
 	private readonly options: LiveSessionSelectorOptions;
 	private selectedIndex: number;
 	focused = false;
 
-	constructor(slots: readonly SessionSlot[], options: LiveSessionSelectorOptions) {
-		this.slots = slots;
+	constructor(slots: readonly (LiveSessionDisplay | SessionSlot)[], options: LiveSessionSelectorOptions) {
+		this.slots = slots.map((entry) => ("slot" in entry ? entry : { slot: entry }));
 		this.options = options;
 		this.selectedIndex = Math.max(
 			0,
-			slots.findIndex((slot) => slot.id === options.foregroundSlotId),
+			this.slots.findIndex((display) => display.slot.id === options.foregroundSlotId),
 		);
 	}
 
@@ -39,8 +46,9 @@ export class LiveSessionSelector implements Component {
 			this.selectedIndex = Math.min(this.slots.length - 1, this.selectedIndex + 1);
 			return;
 		}
-		const slot = this.slots[this.selectedIndex];
-		if (!slot) return;
+		const display = this.slots[this.selectedIndex];
+		if (!display) return;
+		const slot = display.slot;
 		if (data === "x") {
 			void this.options.onClose(slot.id);
 			return;
@@ -57,14 +65,22 @@ export class LiveSessionSelector implements Component {
 	render(width: number): string[] {
 		const lines = [theme.bold("Live sessions"), ""];
 		for (let index = 0; index < this.slots.length; index++) {
-			const slot = this.slots[index];
+			const display = this.slots[index]!;
+			const slot = display.slot;
 			const marker = slot.id === this.options.foregroundSlotId ? "●" : " ";
+			const role = display.row?.role ?? "unassigned";
 			const title = slot.session.sessionName ?? slot.cwd.split(/[\\/]/).filter(Boolean).pop() ?? slot.id;
-			const status = slot.activity.busy ? "busy" : "idle";
+			const status = slot.activity.busy ? "running/busy" : "idle";
+			const task = display.task ? ` · ${display.task.goalId}/${display.task.taskId}` : "";
 			const unread = slot.activity.unread ? "  unread" : "";
-			const suffix = ` · ${slot.id}`;
+			const indent = role === "executor" ? "  " : "";
 			const prefix = index === this.selectedIndex ? ">" : " ";
-			lines.push(`${prefix} ${marker} ${title}${suffix}  ${status}${unread}  ${slot.cwd}`.slice(0, width));
+			lines.push(
+				`${prefix} ${indent}${marker} ${role} · ${title} · ${slot.id} · ${status}${unread}${task}  ${slot.cwd}`.slice(
+					0,
+					width,
+				),
+			);
 		}
 		lines.push("", theme.fg("muted", "Enter switch · a abort · x close · Esc cancel"));
 		return lines;

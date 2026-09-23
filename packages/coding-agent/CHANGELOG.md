@@ -8,6 +8,7 @@
 
 ### Added
 
+- Added formal PiRoot Control Plane storage under `.pi/`, durable Controller/Executor roles and assignments, Session-native Task lifecycle with stop-envelope validation, Controller ControlEvents, managed-path mutation protection, and `/sessions` role/task projection.
 - Added Meta (Muse subscription) login via `/login meta` with automatic Model API key refresh, plus `META_API_KEY` support ([#9096](https://github.com/earendil-works/pi/pull/9096) by [@xl0](https://github.com/xl0)).
 
 ### Changed

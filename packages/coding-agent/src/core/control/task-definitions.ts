@@ -1,8 +1,18 @@
-import { closeSync, fsyncSync, mkdirSync, openSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { listTasks, readGoal, readTask, type TaskRecord } from "./read-model.ts";
+import { listTasks, readGoal, readTask, resolveControlDirectory, type TaskRecord } from "./read-model.ts";
 import { withTaskMutationLock } from "./task-lock.ts";
 import { isTerminalTaskStatus, parseTaskStatus } from "./task-status.ts";
+
+export interface GoalDefinitionInput {
+	readonly title?: string;
+	readonly status?: string;
+}
+
+export interface GoalDefinitionPatch {
+	readonly title?: string;
+	readonly status?: string;
+}
 
 export interface TaskDefinitionInput {
 	readonly objective: string;
@@ -12,6 +22,27 @@ export interface TaskDefinitionInput {
 }
 
 export type TaskDefinitionPatch = Partial<TaskDefinitionInput>;
+
+export function createGoal(piRoot: string, goalId: string, definition: GoalDefinitionInput = {}): string {
+	if (!/^[A-Za-z0-9][A-Za-z0-9-]*$/.test(goalId)) throw new Error("Invalid Goal identity");
+	const directory = join(resolveControlDirectory(piRoot), goalId);
+	if (existsSync(directory)) throw new Error(`Goal already exists: ${goalId}`);
+	mkdirSync(join(directory, "tasks"), { recursive: true });
+	writeFileSync(
+		join(directory, "goal.md"),
+		[`# ${definition.title ?? goalId}`, `Status: ${definition.status ?? "READY"}`, ""].join("\n"),
+	);
+	return join(directory, "goal.md");
+}
+
+export function reviseGoal(piRoot: string, goalId: string, patch: GoalDefinitionPatch): string {
+	const goal = readGoal(piRoot, goalId);
+	let content = goal.content;
+	if (patch.title !== undefined) content = content.replace(/^# .*$/m, `# ${patch.title}`);
+	if (patch.status !== undefined) content = content.replace(/^Status:.*$/m, `Status: ${patch.status}`);
+	atomicWrite(goal.goalFile, content);
+	return goal.goalFile;
+}
 
 function field(content: string, name: string, value: string): string {
 	const lines = content.split(/(\r?\n)/);

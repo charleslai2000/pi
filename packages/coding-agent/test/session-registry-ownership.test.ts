@@ -8,6 +8,7 @@ function project(): string {
 	const base = mkdtempSync(join("/tmp", "pi-registry-owner-"));
 	const root = join(base, "project");
 	mkdirSync(join(root, ".pi"), { recursive: true });
+	mkdirSync(join(root, "control"), { recursive: true });
 	return root;
 }
 

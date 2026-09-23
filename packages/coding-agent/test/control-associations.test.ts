@@ -21,12 +21,13 @@ import { getDefaultSessionDir } from "../src/core/session-manager.ts";
 
 function fixture(): { root: string; sessionId: string } {
 	const root = mkdtempSync(join("/tmp", "pi-associations-"));
+	mkdirSync(join(root, ".pi"), { recursive: true });
 	const taskDir = join(root, "control", "warm-multi-session", "tasks");
 	mkdirSync(taskDir, { recursive: true });
 	writeFileSync(join(root, "control", "warm-multi-session", "goal.md"), "# Warm\n");
 	writeFileSync(join(taskDir, "T001-work.md"), "Status: READY\n");
 	const sessionId = "session-a";
-	setPiRoot(root, "legacy");
+	setPiRoot(root, "formal");
 	const sessionDir = getDefaultSessionDir(root);
 	writeFileSync(
 		join(sessionDir, "session-a.jsonl"),
@@ -38,7 +39,15 @@ function fixture(): { root: string; sessionId: string } {
 function valid(sessionId: string) {
 	return {
 		version: 1 as const,
-		current: [{ goalId: "warm-multi-session", taskId: "T001", sessionId, assignedAt: "2026-01-01T00:00:00.000Z" }],
+		current: [
+			{
+				goalId: "warm-multi-session",
+				taskId: "T001",
+				sessionId,
+				assignedAt: "2026-01-01T00:00:00.000Z",
+				generation: 1,
+			},
+		],
 		history: [
 			{
 				goalId: "warm-multi-session",
@@ -70,7 +79,7 @@ describe("durable task/session associations", () => {
 	});
 
 	it("allows historical N:N and inactive durable sessions, including control sessions", () => {
-		const { root, sessionId } = fixture();
+		const { root } = fixture();
 		const second = "session-b";
 		writeFileSync(
 			join(getDefaultSessionDir(root), "session-b.jsonl"),
@@ -78,7 +87,15 @@ describe("durable task/session associations", () => {
 		);
 		const data = {
 			version: 1 as const,
-			current: [{ goalId: "warm-multi-session", taskId: "T001", sessionId, assignedAt: "2026-01-01T00:00:00.000Z" }],
+			current: [
+				{
+					goalId: "warm-multi-session",
+					taskId: "T001",
+					sessionId: second,
+					assignedAt: "2026-01-01T00:00:00.000Z",
+					generation: 2,
+				},
+			],
 			history: [
 				{
 					goalId: "warm-multi-session",
@@ -97,7 +114,7 @@ describe("durable task/session associations", () => {
 				{
 					goalId: "warm-multi-session",
 					taskId: "T001",
-					sessionId,
+					sessionId: second,
 					type: "assigned" as const,
 					at: "2026-01-01T00:00:00.000Z",
 				},
@@ -109,30 +126,44 @@ describe("durable task/session associations", () => {
 	it("rejects identity, schema, cardinality, and malformed timestamp errors", () => {
 		const { root, sessionId } = fixture();
 		const assertInvalid = (data: unknown): void => {
-			writeFileSync(join(root, "control", "assignments.json"), JSON.stringify(data));
+			writeFileSync(join(root, ".pi", "assignments.json"), JSON.stringify(data));
 			expect(() => readAssociations(root)).toThrow(AssociationError);
 		};
 		assertInvalid({ version: 2, current: [], history: [] });
 		assertInvalid({ version: 1, current: [], history: [], extra: true });
 		assertInvalid({
 			version: 1,
-			current: [{ goalId: "warm-multi-session", taskId: "T001", sessionId, assignedAt: "bad" }],
+			current: [{ goalId: "warm-multi-session", taskId: "T001", sessionId, assignedAt: "bad", generation: 1 }],
 			history: [],
 		});
 		assertInvalid({
 			version: 1,
-			current: [{ goalId: "missing", taskId: "T001", sessionId, assignedAt: "2026-01-01T00:00:00Z" }],
-			history: [],
-		});
-		assertInvalid({
-			version: 1,
-			current: [{ goalId: "warm-multi-session", taskId: "T999", sessionId, assignedAt: "2026-01-01T00:00:00Z" }],
+			current: [{ goalId: "missing", taskId: "T001", sessionId, assignedAt: "2026-01-01T00:00:00Z", generation: 1 }],
 			history: [],
 		});
 		assertInvalid({
 			version: 1,
 			current: [
-				{ goalId: "warm-multi-session", taskId: "T001", sessionId: "missing", assignedAt: "2026-01-01T00:00:00Z" },
+				{
+					goalId: "warm-multi-session",
+					taskId: "T999",
+					sessionId,
+					assignedAt: "2026-01-01T00:00:00Z",
+					generation: 1,
+				},
+			],
+			history: [],
+		});
+		assertInvalid({
+			version: 1,
+			current: [
+				{
+					goalId: "warm-multi-session",
+					taskId: "T001",
+					sessionId: "missing",
+					assignedAt: "2026-01-01T00:00:00Z",
+					generation: 1,
+				},
 			],
 			history: [],
 		});
@@ -146,12 +177,20 @@ describe("durable task/session associations", () => {
 	it("preserves the old file on invalid write and leaves no temp file after replacement", () => {
 		const { root, sessionId } = fixture();
 		writeAssociations(root, valid(sessionId));
-		const path = join(root, "control", "assignments.json");
+		const path = join(root, ".pi", "assignments.json");
 		const before = readFileSync(path);
 		expect(() =>
 			writeAssociations(root, {
 				version: 1,
-				current: [{ goalId: "warm-multi-session", taskId: "T999", sessionId, assignedAt: "2026-01-01T00:00:00Z" }],
+				current: [
+					{
+						goalId: "warm-multi-session",
+						taskId: "T999",
+						sessionId,
+						assignedAt: "2026-01-01T00:00:00Z",
+						generation: 1,
+					},
+				],
 				history: [],
 			}),
 		).toThrow(AssociationError);
@@ -177,6 +216,7 @@ describe("durable task/session associations", () => {
 		expect((await assignTaskToSession(root, "warm-multi-session", "T001", sessionId)).changed).toBe(true);
 		expect((await assignTaskToSession(root, "warm-multi-session", "T001", sessionId)).changed).toBe(false);
 		expect((await reassignTaskToSession(root, "warm-multi-session", "T001", second)).changed).toBe(true);
+		expect(readAssociations(root).current.find((item) => item.taskId === "T001")?.generation).toBe(2);
 		expect(
 			readAssociations(root)
 				.history.slice(-2)
@@ -187,6 +227,9 @@ describe("durable task/session associations", () => {
 		]);
 		expect((await unassignTask(root, "warm-multi-session", "T001")).changed).toBe(true);
 		expect((await unassignTask(root, "warm-multi-session", "T001")).changed).toBe(false);
+		expect(
+			(await assignTaskToSession(root, "warm-multi-session", "T001", sessionId)).record.current[0]?.generation,
+		).toBe(3);
 	});
 
 	it("rejects current conflicts and unassigned reassign", async () => {
@@ -228,7 +271,7 @@ describe("durable task/session associations", () => {
 		);
 		setAssociationMutationHooksForTesting({
 			beforeCommit: () => {
-				writeFileSync(join(root, "control", "assignments.json"), '{"version":1,"current":[],"history":[]}\n');
+				writeFileSync(join(root, ".pi", "assignments.json"), '{"version":1,"current":[],"history":[]}\n');
 			},
 		});
 		await expect(assignTaskToSession(root, "warm-multi-session", "T003", third)).rejects.toThrow(
@@ -248,8 +291,15 @@ describe("durable task/session associations", () => {
 
 	it("does not create control or depend on the Registry database", () => {
 		const root = mkdtempSync(join("/tmp", "pi-associations-no-control-"));
-		expect(() => readAssociations(root)).toThrow(AssociationError);
-		expect(existsSync(join(root, "control"))).toBe(false);
+		mkdirSync(join(root, ".pi"), { recursive: true });
+		mkdirSync(join(root, "control"), { recursive: true });
+		setPiRoot(root, "formal");
+		const taskDir = join(root, "control", "goal-a", "tasks");
+		mkdirSync(taskDir, { recursive: true });
+		writeFileSync(join(root, "control", "goal-a", "goal.md"), "# Goal A\n");
+		writeFileSync(join(taskDir, "T001-work.md"), "Status: READY\n");
+		expect(readAssociations(root).current).toEqual([]);
+		expect(existsSync(join(root, ".pi", "state", "control.sqlite3"))).toBe(false);
 		rmSync(root, { recursive: true, force: true });
 	});
 });

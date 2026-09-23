@@ -1,10 +1,17 @@
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import type { AgentMessage } from "@earendil-works/pi-agent-core";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { AgentSessionRuntime } from "../src/core/agent-session-runtime.ts";
-import { assignTaskToSession, readAssociations } from "../src/core/control/associations.ts";
+import {
+	assignTaskToSession,
+	readAssociations,
+	unassignTask,
+	withAssociationMutationLock,
+} from "../src/core/control/associations.ts";
 import { readExecutionAttempts } from "../src/core/control/execution-attempts.ts";
 import { readTask } from "../src/core/control/read-model.ts";
+import { completeTask } from "../src/core/control/task-mutations.ts";
 import { setPiRoot } from "../src/core/pi-root.ts";
 import { getDefaultSessionDir } from "../src/core/session-manager.ts";
 import { SessionRegistry, setSessionRegistryForTesting } from "../src/core/session-registry.ts";
@@ -16,12 +23,13 @@ function fixture(status = "READY"): {
 	runtime: AgentSessionRuntime;
 } {
 	const root = mkdtempSync(join("/tmp", "pi-native-task-lifecycle-"));
+	mkdirSync(join(root, ".pi"), { recursive: true });
 	const taskDir = join(root, "control", "goal-a", "tasks");
 	mkdirSync(taskDir, { recursive: true });
 	const taskPath = join(taskDir, "T001-work.md");
 	writeFileSync(join(root, "control", "goal-a", "goal.md"), "# Goal A\n");
 	writeFileSync(taskPath, `Status: ${status}\nObjective: test native lifecycle\nResult: old\nRemaining: later\n`);
-	setPiRoot(root, "legacy");
+	setPiRoot(root, "formal");
 	const registry = new SessionRegistry(root);
 	setSessionRegistryForTesting(registry);
 	const session = new FakeSession();
@@ -37,9 +45,16 @@ function fixture(status = "READY"): {
 		getForeground: () => ({ session }),
 	};
 	const runtime = Object.assign(Object.create(AgentSessionRuntime.prototype) as AgentSessionRuntime, {
-		_sessionPool: pool,
 		taskSessionBindings: new Map(),
 		taskSessionAdmission: new Map(),
+		taskRunGenerations: new Map(),
+		controllerNoticeKeys: new Set<string>(),
+		suppressExecutorSettlement: new Set<string>(),
+		_sessionPool: {
+			...pool,
+			findBySessionId: (id: string) => (id === "s1" ? { session } : undefined),
+		},
+		notifyController: vi.fn(async () => {}),
 	});
 	return { root, taskPath, session, runtime };
 }
@@ -49,8 +64,11 @@ class FakeSession {
 	private listeners = new Set<(event: { type: string }) => void>();
 	private tools = new Map<string, { execute: (id: string, params: unknown) => Promise<unknown> }>();
 	activeTools: string[] = [];
+	messages: AgentMessage[] = [];
+	isIdle = true;
 	promptCount = 0;
 	promptText = "";
+	nextPromptResolver?: () => void;
 
 	getActiveToolNames(): string[] {
 		return [...this.activeTools];
@@ -83,6 +101,19 @@ class FakeSession {
 	async prompt(text: string): Promise<void> {
 		this.promptCount++;
 		this.promptText = text;
+		if (text === "deferNextPrompt") {
+			this.nextPromptResolver?.();
+			await new Promise<void>((resolve) => {
+				this.nextPromptResolver = resolve;
+			});
+			return;
+		}
+		if (text.startsWith("<pi-executor-stop>"))
+			this.messages.push({
+				role: "assistant",
+				content: [{ type: "text", text }],
+				stopReason: "stop",
+			} as AgentMessage);
 	}
 }
 
@@ -96,10 +127,7 @@ describe("native Task Session lifecycle", () => {
 		const value = fixture();
 		await assignTaskToSession(value.root, "goal-a", "T001", "s1");
 		await value.runtime.startAssignedTask("goal-a", "T001");
-		const resultTool = value.session.getTool("task_result");
-		expect(resultTool).toBeDefined();
-		expect(value.session.taskProtocol).toContain("task_result is the only formal exit");
-		expect(value.session.taskProtocol).toContain("MUST call task_result(outcome=complete");
+		expect(value.session.taskProtocol).toContain("pi-executor-stop");
 		expect(value.session.taskProtocol).toContain("task_memory is optional durable memory");
 		expect(value.session.activeTools).toEqual(["task_gate"]);
 	});
@@ -112,15 +140,94 @@ describe("native Task Session lifecycle", () => {
 		await expect(value.session.getTool("task_memory")?.execute("1", { memory: "no" })).rejects.toThrow("gate");
 		await value.session.getTool("task_gate")!.execute("1", { decision: "accept" });
 		expect(readTask(value.root, "goal-a", "T001").status).toBe("ACTIVE");
-		expect(value.session.activeTools).toEqual(["task_memory", "task_result"]);
+		expect(value.session.activeTools).toEqual(["task_memory"]);
 		value.session.emit("agent_settled");
-		await new Promise((resolve) => setImmediate(resolve));
+		await new Promise((resolve) => setTimeout(resolve, 20));
 		expect(readTask(value.root, "goal-a", "T001").status).toBe("BLOCKED");
 		value.session.emit("agent_start");
-		await new Promise((resolve) => setImmediate(resolve));
+		await vi.waitFor(() => expect(readTask(value.root, "goal-a", "T001").status).toBe("ACTIVE"));
 		expect(readTask(value.root, "goal-a", "T001").status).toBe("ACTIVE");
 		expect(value.session.promptCount).toBe(1);
 		expect(readExecutionAttempts(value.root).attempts).toEqual([]);
+	});
+
+	it("drops an old settle after a new user run starts, without changing Task or notifying Controller", async () => {
+		const value = fixture();
+		await assignTaskToSession(value.root, "goal-a", "T001", "s1");
+		await value.runtime.startAssignedTask("goal-a", "T001");
+		await value.session.getTool("task_gate")!.execute("1", { decision: "accept" });
+		value.session.messages.push({
+			role: "assistant",
+			content: [
+				{ type: "text", text: '<pi-executor-stop>{"reason":"completed","result":"stale"}</pi-executor-stop>' },
+			],
+			stopReason: "stop",
+		} as AgentMessage);
+		const assignment = readAssociations(value.root).current[0]!;
+		const { generation: staleGeneration } = assignment;
+		let releaseMutation!: () => void;
+		const locked = new Promise<void>((resolve) => {
+			releaseMutation = resolve;
+		});
+		const hold = withAssociationMutationLock(value.root, () => locked);
+		value.session.emit("agent_settled");
+		value.session.emit("agent_start");
+		const release = unassignTask(value.root, "goal-a", "T001");
+		const redispatch = release.then(() => assignTaskToSession(value.root, "goal-a", "T001", "s1"));
+		releaseMutation();
+		await hold;
+		await redispatch;
+		expect(readAssociations(value.root).current[0]?.generation).toBe(staleGeneration + 1);
+		await new Promise((resolve) => setTimeout(resolve, 30));
+		expect(readTask(value.root, "goal-a", "T001").status).toBe("ACTIVE");
+		expect(readAssociations(value.root).current).toHaveLength(1);
+		expect(
+			(value.runtime as unknown as { notifyController: ReturnType<typeof vi.fn> }).notifyController,
+		).not.toHaveBeenCalled();
+	});
+
+	it("does not let a late terminated envelope overwrite terminal Task state", async () => {
+		const value = fixture();
+		await assignTaskToSession(value.root, "goal-a", "T001", "s1");
+		await value.runtime.startAssignedTask("goal-a", "T001");
+		await value.session.getTool("task_gate")!.execute("1", { decision: "accept" });
+		await completeTask(value.root, "goal-a", "T001", { result: "already complete" });
+		value.session.messages.push({
+			role: "assistant",
+			content: [
+				{ type: "text", text: '<pi-executor-stop>{"reason":"terminated","result":"late"}</pi-executor-stop>' },
+			],
+			stopReason: "stop",
+		} as AgentMessage);
+		value.session.emit("agent_settled");
+		await new Promise((resolve) => setTimeout(resolve, 30));
+		expect(readTask(value.root, "goal-a", "T001").status).toBe("DONE");
+		expect(readTask(value.root, "goal-a", "T001").result).toBe("already complete");
+		expect(readAssociations(value.root).current.map((assignment) => assignment.taskId)).toEqual(["T001"]);
+		expect(
+			(value.runtime as unknown as { notifyController: ReturnType<typeof vi.fn> }).notifyController,
+		).not.toHaveBeenCalled();
+	});
+
+	it("keeps continue_possible active for the same Session until a later completion", async () => {
+		const value = fixture();
+		await assignTaskToSession(value.root, "goal-a", "T001", "s1");
+		await value.runtime.startAssignedTask("goal-a", "T001");
+		await value.session.getTool("task_gate")!.execute("1", { decision: "accept" });
+		await value.session.prompt('<pi-executor-stop>{"reason":"continue_possible"}</pi-executor-stop>');
+		value.session.emit("agent_settled");
+		await vi.waitFor(() => expect(value.session.isIdle).toBe(true));
+		await new Promise((resolve) => setTimeout(resolve, 20));
+		expect(readTask(value.root, "goal-a", "T001").status).toBe("ACTIVE");
+		expect(readAssociations(value.root).current).toHaveLength(1);
+		expect(
+			(value.runtime as unknown as { notifyController: ReturnType<typeof vi.fn> }).notifyController,
+		).not.toHaveBeenCalled();
+		value.session.emit("agent_start");
+		await value.session.prompt('<pi-executor-stop>{"reason":"completed","result":"done"}</pi-executor-stop>');
+		value.session.emit("agent_settled");
+		await vi.waitFor(() => expect(readTask(value.root, "goal-a", "T001").status).toBe("DONE"));
+		expect(readAssociations(value.root).current).toEqual([]);
 	});
 
 	it("rebinds an admitted BLOCKED Task without reinstalling the gate", async () => {
@@ -129,7 +236,7 @@ describe("native Task Session lifecycle", () => {
 		const rebind = (value.runtime as unknown as { rebindAssignedTask: (session: FakeSession) => Promise<void> })
 			.rebindAssignedTask;
 		await rebind.call(value.runtime, value.session);
-		expect(value.session.activeTools).toEqual(["task_memory", "task_result"]);
+		expect(value.session.activeTools).toEqual(["task_memory"]);
 		expect(value.session.activeTools).not.toContain("task_gate");
 		expect(readTask(value.root, "goal-a", "T001").status).toBe("BLOCKED");
 	});
@@ -141,7 +248,7 @@ describe("native Task Session lifecycle", () => {
 			value.runtime as unknown as { setRebindSession: (callback: (session: FakeSession) => Promise<void>) => void }
 		).setRebindSession(async (session) => session.setActiveToolsByName(["task_memory"]));
 		await (value.runtime as unknown as { finishSessionReplacement: () => Promise<void> }).finishSessionReplacement();
-		expect(value.session.activeTools).toEqual(["task_memory", "task_memory", "task_result"]);
+		expect(value.session.activeTools).toEqual(["task_memory", "task_memory"]);
 		expect(value.session.activeTools).not.toContain("task_gate");
 	});
 
@@ -151,8 +258,8 @@ describe("native Task Session lifecycle", () => {
 		await (
 			value.runtime as unknown as { rebindAssignedTask: (session: FakeSession) => Promise<void> }
 		).rebindAssignedTask(value.session);
-		value.session.setActiveToolsByName(["read", "bash", "task_memory", "task_result"]);
-		expect(value.session.activeTools).toEqual(["read", "bash", "task_memory", "task_result"]);
+		value.session.setActiveToolsByName(["read", "bash", "task_memory"]);
+		expect(value.session.activeTools).toEqual(["read", "bash", "task_memory"]);
 		expect(value.session.activeTools).not.toContain("task_gate");
 	});
 
@@ -173,9 +280,11 @@ describe("native Task Session lifecycle", () => {
 		await value.session.getTool("task_gate")!.execute("1", { decision: "accept" });
 		await value.session.getTool("task_memory")!.execute("1", { memory: "Decision: keep Session-native execution." });
 		expect(readFileSync(value.taskPath, "utf8")).toContain("Memory: Decision: keep Session-native execution.");
-		await value.session
-			.getTool("task_result")!
-			.execute("1", { outcome: "terminated", result: "partial", remaining: "next" });
+		await value.session.prompt(
+			'<pi-executor-stop>{"reason":"terminated","result":"partial","remaining":"next"}</pi-executor-stop>',
+		);
+		value.session.emit("agent_settled");
+		await vi.waitFor(() => expect(readTask(value.root, "goal-a", "T001").status).toBe("DEFERRED"));
 		expect(readTask(value.root, "goal-a", "T001")).toMatchObject({
 			status: "DEFERRED",
 			result: "partial",

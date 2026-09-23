@@ -14,7 +14,7 @@ import { readTask } from "../src/core/control/read-model.ts";
 import { ModelRuntime } from "../src/core/model-runtime.ts";
 import { setPiRoot } from "../src/core/pi-root.ts";
 import { startPiRootApplication } from "../src/core/pi-root-application.ts";
-import { getDefaultSessionDir, SessionManager } from "../src/core/session-manager.ts";
+import { SessionManager } from "../src/core/session-manager.ts";
 import { setSessionRegistryForTesting } from "../src/core/session-registry.ts";
 
 const cleanups: Array<() => Promise<void>> = [];
@@ -48,12 +48,16 @@ describe("C4 integrated Session-native orchestration", () => {
 		const base = mkdtempSync(join("/tmp", "pi-c4-integrated-e2e-"));
 		const root = join(base, "project");
 		const agentDir = join(base, "agent");
-		const sessionDir = getDefaultSessionDir(root);
+		const sessionDir = join(root, ".pi", "sessions");
 		mkdirSync(join(root, ".pi"), { recursive: true });
 		mkdirSync(join(root, "control", "goal-a", "tasks"), { recursive: true });
 		writeFileSync(join(root, "control", "goal-a", "goal.md"), "# Goal A\n");
 		const faux = registerFauxProvider();
-		faux.setResponses(Array.from({ length: 20 }, () => fauxAssistantMessage("settled")));
+		faux.setResponses([]);
+		const queueEnvelope = (reason: string, result = "faux result") =>
+			faux.appendResponses([
+				fauxAssistantMessage(`<pi-executor-stop>{"reason":"${reason}","result":"${result}"}</pi-executor-stop>`),
+			]);
 		const auth = AuthStorage.inMemory();
 		await auth.modify(faux.getModel().provider, async () => ({ type: "api_key", key: "e2e" }));
 		const modelRuntime = await ModelRuntime.create({ credentials: auth, modelsPath: null, allowModelNetwork: false });
@@ -182,36 +186,47 @@ describe("C4 integrated Session-native orchestration", () => {
 		const originalTaskFile = readTask(root, "goal-a", "T001").path;
 		const executorLifecycle: string[] = [];
 		const unsubscribeExecutor = executors[0]!.session.subscribe((event) => executorLifecycle.push(event.type));
-		await executors[0]!.session.prompt("User supplied additional evidence directly.");
+		await tool(executors[0]!.session, "task_memory", { memory: "parallel evidence 0; user follow-up handled" });
+		queueEnvelope("completed", "result-0");
+		await executors[0]!.session.prompt(
+			'<pi-executor-stop>{"reason":"completed","result":"result-0"}</pi-executor-stop>',
+		);
 		unsubscribeExecutor();
 		expect(executorLifecycle).toEqual(expect.arrayContaining(["agent_start", "agent_settled"]));
-		expect(readTask(root, "goal-a", "T001").status).toBe("BLOCKED");
+		await expect.poll(() => readTask(root, "goal-a", "T001").status).toBe("DONE");
 		expect(executors[0]!.session.sessionManager.getSessionId()).toBe(originalExecutorId);
-		expect(readAssociations(root).current.some((assignment) => assignment.taskId === "T001")).toBe(true);
-		const resumeEvents: string[] = [];
-		const unsubscribeResume = executors[0]!.session.subscribe((event) => resumeEvents.push(event.type));
-		await executors[0]!.session.prompt("User asks the same Executor to continue.");
-		unsubscribeResume();
-		expect(resumeEvents).toEqual(expect.arrayContaining(["agent_start", "agent_settled"]));
-		await tool(executors[0]!.session, "task_memory", { memory: "parallel evidence 0; user follow-up handled" });
-		await tool(executors[0]!.session, "task_result", { outcome: "complete", result: "result-0" });
+		expect(readAssociations(root).current.some((assignment) => assignment.taskId === "T001")).toBe(false);
+		expect(readTask(root, "goal-a", "T001").status).toBe("DONE");
+		expect(readAssociations(root).current.some((assignment) => assignment.taskId === "T001")).toBe(false);
 		await tool(executors[1]!.session, "task_gate", { decision: "accept" });
 		await tool(executors[1]!.session, "task_memory", { memory: "parallel evidence 1" });
-		await tool(executors[1]!.session, "task_result", { outcome: "complete", result: "result-1" });
+		queueEnvelope("completed", "result-1");
+		queueEnvelope("completed", "result-1");
+		await executors[1]!.session.prompt("Executor T002 work turn.");
 		expect(readFileSync(originalTaskFile, "utf8")).toContain("user follow-up handled");
-		expect(readTask(root, "goal-a", "T001").status).toBe("DONE");
-		expect(readTask(root, "goal-a", "T002").status).toBe("DONE");
+		await expect.poll(() => readTask(root, "goal-a", "T001").status).toBe("DONE");
+		await expect.poll(() => readTask(root, "goal-a", "T002").status).toBe("DONE");
+		const tenureHistory = readAssociations(root).history.filter(
+			(event) => event.goalId === "goal-a" && event.taskId === "T001" && event.type === "assigned",
+		);
+		expect(tenureHistory.map((event) => event.sessionId)).toEqual([
+			executors[0]!.session.sessionManager.getSessionId(),
+		]);
 		expect(readAssociations(root).current).toEqual([]);
 		const frontier = JSON.parse(text(await call("inspect_frontier", {}))) as Array<{ taskId: string }>;
 		expect(frontier.map((task) => task.taskId)).toContain("T003");
+		faux.appendResponses([
+			fauxAssistantMessage('<pi-executor-stop>{"reason":"completed","result":"joined"}</pi-executor-stop>'),
+		]);
 		await call("dispatch_task", {
 			goalId: "goal-a",
 			taskId: "T003",
 			sessionId: executors[0]!.session.sessionManager.getSessionId(),
 		});
 		await tool(executors[0]!.session, "task_gate", { decision: "accept" });
-		await tool(executors[0]!.session, "task_result", { outcome: "complete", result: "joined" });
-		expect(readTask(root, "goal-a", "T003").status).toBe("DONE");
+		queueEnvelope("completed", "joined");
+		await executors[0]!.session.prompt("Join T001 and T002.");
+		await expect.poll(() => readTask(root, "goal-a", "T003").status).toBe("DONE");
 		const review = await call("create_task", {
 			goalId: "goal-a",
 			taskId: "T004",
@@ -226,15 +241,22 @@ describe("C4 integrated Session-native orchestration", () => {
 			taskId: "T004",
 			prerequisites: [{ goalId: "goal-a", taskId: "T003" }],
 		});
+		faux.appendResponses([
+			fauxAssistantMessage('<pi-executor-stop>{"reason":"completed","result":"PASS"}</pi-executor-stop>'),
+		]);
 		await call("dispatch_task", {
 			goalId: "goal-a",
 			taskId: "T004",
 			sessionId: executors[1]!.session.sessionManager.getSessionId(),
 		});
 		await tool(executors[1]!.session, "task_gate", { decision: "accept" });
-		await tool(executors[1]!.session, "task_result", { outcome: "complete", result: "PASS" });
-		expect(readTask(root, "goal-a", "T003").status).toBe("DONE");
-		expect(readTask(root, "goal-a", "T004").status).toBe("DONE");
+		faux.appendResponses([
+			fauxAssistantMessage('<pi-executor-stop>{"reason":"completed","result":"PASS"}</pi-executor-stop>'),
+		]);
+		queueEnvelope("completed", "PASS");
+		await executors[1]!.session.prompt("Review T003 and report PASS.");
+		await expect.poll(() => readTask(root, "goal-a", "T003").status).toBe("DONE");
+		await expect.poll(() => readTask(root, "goal-a", "T004").status).toBe("DONE");
 		await call("create_task", {
 			goalId: "goal-a",
 			taskId: "T005",
@@ -249,20 +271,66 @@ describe("C4 integrated Session-native orchestration", () => {
 		});
 		await tool(executors[0]!.session, "task_gate", { decision: "accept" });
 		await tool(executors[0]!.session, "task_memory", { memory: "handoff evidence before termination" });
-		await tool(executors[0]!.session, "task_result", { outcome: "terminated", result: "needs another Executor" });
-		expect(readTask(root, "goal-a", "T005").status).toBe("DEFERRED");
+		faux.setResponses([
+			fauxAssistantMessage(
+				'<pi-executor-stop>{"reason":"terminated","result":"needs another Executor"}</pi-executor-stop>',
+			),
+		]);
+		const terminationEvents: Array<{
+			type: string;
+			taskStatus: string | undefined;
+			assignment: string | undefined;
+			assistantText?: string;
+		}> = [];
+		const stopTracing = executors[0]!.session.subscribe((event) => {
+			if (event.type === "agent_start" || event.type === "agent_settled") {
+				const lastAssistant = [...executors[0]!.session.messages]
+					.reverse()
+					.find((message) => message.role === "assistant");
+				terminationEvents.push({
+					type: event.type,
+					taskStatus: readTask(root, "goal-a", "T005").status,
+					assignment: readAssociations(root).current.find((item) => item.taskId === "T005")?.sessionId,
+					assistantText:
+						lastAssistant?.role === "assistant" && Array.isArray(lastAssistant.content)
+							? lastAssistant.content
+									.filter((part) => part.type === "text")
+									.map((part) => part.text)
+									.join("")
+							: undefined,
+				});
+			}
+		});
+		await executors[0]!.session.prompt("This Executor must terminate and hand off.");
+		await expect.poll(() => readTask(root, "goal-a", "T005").status).toBe("DEFERRED");
+		stopTracing();
+		expect(
+			terminationEvents.some(
+				(event) => event.type === "agent_settled" && event.assistantText?.includes('"reason":"terminated"'),
+			),
+		).toBe(true);
 		expect(readAssociations(root).current).toEqual([]);
+		faux.appendResponses([
+			fauxAssistantMessage(
+				'<pi-executor-stop>{"reason":"completed","result":"handoff complete"}</pi-executor-stop>',
+			),
+		]);
 		await call("dispatch_task", {
 			goalId: "goal-a",
 			taskId: "T005",
 			sessionId: executors[1]!.session.sessionManager.getSessionId(),
 		});
 		await tool(executors[1]!.session, "task_gate", { decision: "accept" });
+		faux.appendResponses([
+			fauxAssistantMessage(
+				'<pi-executor-stop>{"reason":"completed","result":"handoff complete"}</pi-executor-stop>',
+			),
+		]);
 		expect(readFileSync(readTask(root, "goal-a", "T005").path, "utf8")).toContain(
 			"handoff evidence before termination",
 		);
-		await tool(executors[1]!.session, "task_result", { outcome: "complete", result: "handoff complete" });
-		expect(readTask(root, "goal-a", "T005").status).toBe("DONE");
+		await executors[1]!.session.prompt("Complete the reassigned Task.");
+		await expect.poll(() => readTask(root, "goal-a", "T005").status).toBe("DONE");
 		expect(readAssociations(root).current).toEqual([]);
 		expect(readExecutionAttempts(root).attempts).toEqual([]);
 		expect(eventOrder).toContain("switch_executor_model");
@@ -281,6 +349,7 @@ describe("C4 integrated Session-native orchestration", () => {
 			objective: "Remain assigned across restart",
 			completion: "continue after recovery",
 		});
+		queueEnvelope("blocked_external", "restart checkpoint");
 		await call("dispatch_task", {
 			goalId: "goal-a",
 			taskId: "T006",
@@ -289,25 +358,39 @@ describe("C4 integrated Session-native orchestration", () => {
 		await tool(executors[0]!.session, "task_gate", { decision: "accept" });
 		await tool(executors[0]!.session, "task_memory", { memory: "recovery durable checkpoint" });
 		await executors[0]!.session.prompt("settle before process restart");
-		expect(readTask(root, "goal-a", "T006").status).toBe("BLOCKED");
+		await expect.poll(() => readTask(root, "goal-a", "T006").status).toBe("BLOCKED");
+		await expect
+			.poll(() =>
+				controller.sessionManager
+					.getEntries()
+					.some((entry) => entry.type === "custom_message" && entry.customType === "control_event"),
+			)
+			.toBe(true);
+		expect(
+			controller.sessionManager
+				.getEntries()
+				.filter((entry) => entry.type === "custom_message")
+				.every((entry) => entry.customType === "control_event"),
+		).toBe(true);
 		const recoveredId = executors[0]!.session.sessionManager.getSessionId();
 		const recoveredFile = executors[0]!.session.sessionFile!;
+		const recoveredAssignmentGeneration = readAssociations(root).current.find(
+			(assignment) => assignment.taskId === "T006",
+		)?.generation;
 		await app.shutdown();
 		appClosed = true;
 		setSessionRegistryForTesting(undefined);
-		const recoveredApp = await startPiRootApplication({ root, agentDir, createRuntime });
-		const recoveredManager = SessionManager.open(recoveredFile, sessionDir);
-		const recoveredRuntime = await createRuntime({ cwd: root, agentDir, sessionManager: recoveredManager });
-		const recoveredSlot = recoveredApp.runtimeHost.sessionPool.adopt(
-			recoveredRuntime.session,
-			recoveredRuntime.services,
-		);
+		const recoveredApp = await startPiRootApplication({ root, agentDir, sessionDir, createRuntime });
+		const recoveredSlot = recoveredApp.runtimeHost.sessionPool.findBySessionId(recoveredId);
 		expect(recoveredApp.canonicalControlSessionId).toBe(controller.sessionManager.getSessionId());
-		expect(recoveredSlot.session.sessionManager.getSessionId()).toBe(recoveredId);
+		expect(recoveredSlot?.session.sessionManager.getSessionId()).toBe(recoveredId);
+		expect(recoveredSlot?.session.sessionFile).toBe(recoveredFile);
+		expect(readAssociations(root).current.find((assignment) => assignment.taskId === "T006")?.generation).toBe(
+			recoveredAssignmentGeneration,
+		);
 		expect(readTask(root, "goal-a", "T006").status).toBe("BLOCKED");
 		expect(readFileSync(readTask(root, "goal-a", "T006").path, "utf8")).toContain("recovery durable checkpoint");
-		recoveredApp.runtimeHost.startAssignedTask("goal-a", "T006");
-		expect(recoveredSlot.session.getActiveToolNames()).toEqual(["task_gate"]);
+		expect(recoveredSlot?.session.getActiveToolNames()).toContain("task_memory");
 		await recoveredApp.shutdown();
 		setSessionRegistryForTesting(undefined);
 	});

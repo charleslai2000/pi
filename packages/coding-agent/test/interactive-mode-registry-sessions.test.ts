@@ -15,6 +15,7 @@ function make(): { root: string; registry: SessionRegistry; pool: SessionPool } 
 	const base = mkdtempSync(join("/tmp", "pi-interactive-registry-"));
 	const root = join(base, "project");
 	mkdirSync(join(root, ".pi"), { recursive: true });
+	mkdirSync(join(root, "control"), { recursive: true });
 	mkdirSync(join(root, "design"), { recursive: true });
 	setPiRoot(root, "formal");
 	const registry = new SessionRegistry(root);
@@ -234,7 +235,7 @@ describe("InteractiveMode Registry session paths", () => {
 		).showLiveSessionSelector.call(fakeThis);
 		expect(live?.render(200).join("\n")).toContain("control");
 		expect(live?.render(200).join("\n")).toContain("design");
-		live?.handleInput("k");
+		live?.handleInput("j");
 		live?.handleInput("x");
 		await vi.waitFor(() => expect(runtimeHost.closeSession).toHaveBeenCalledWith("slot-2"));
 		expect(value.pool.findBySessionId("d1")).toBeUndefined();

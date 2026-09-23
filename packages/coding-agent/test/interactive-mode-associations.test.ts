@@ -13,11 +13,12 @@ function makeFixture(): { root: string; sessionDir: string; d1: string; d2: stri
 	const root = mkdtempSync(join("/tmp", "pi-interactive-associations-"));
 	const control = join(root, "control");
 	const taskDir = join(control, "goal-a", "tasks");
+	mkdirSync(join(root, ".pi"), { recursive: true });
 	mkdirSync(taskDir, { recursive: true });
 	writeFileSync(join(control, "goal-a", "goal.md"), "# Goal A\n");
 	writeFileSync(join(taskDir, "T001-work.md"), "Status: READY\n");
 	writeFileSync(join(taskDir, "T002-work.md"), "Status: READY\n");
-	setPiRoot(root, "legacy");
+	setPiRoot(root, "formal");
 	const sessionDir = getDefaultSessionDir(root);
 	const d1 = "d1-session";
 	const d2 = "d2-session";
@@ -174,16 +175,10 @@ describe("InteractiveMode association commands", () => {
 		const submit = commandContext(runtime, status, error);
 
 		await submit("/assign goal-a/T001");
-		expect(error).not.toHaveBeenCalled();
-		expect(readAssociations(value.root).current).toEqual([
-			expect.objectContaining({ goalId: "goal-a", taskId: "T001", sessionId: controlId }),
-		]);
-		expect(readAssociations(value.root).history).toHaveLength(1);
-		expect(registry.rows().find((row) => row.session_id === controlId)?.role).toBe("control");
-		expect(runtime.session.sessionManager.getSessionId()).toBe(controlId);
-
-		await submit("/assign goal-a/T001");
-		expect(readAssociations(value.root).history).toHaveLength(1);
+		expect(error).toHaveBeenCalledWith(expect.stringContaining("Canonical Controller cannot be assigned"));
+		expect(readAssociations(value.root).current).toEqual([]);
+		expect(readAssociations(value.root).history).toHaveLength(0);
+		expect(registry.rows().find((row) => row.session_id === controlId)?.role).toBe("controller");
 		rmSync(value.root, { recursive: true, force: true });
 	});
 
@@ -212,7 +207,7 @@ describe("InteractiveMode association commands", () => {
 		setSessionRegistryForTesting(undefined);
 		setPiRoot(undefined);
 
-		setPiRoot(value.root, "legacy");
+		setPiRoot(value.root, "formal");
 		const registryB = new SessionRegistry(value.root, { acquire: false });
 		registryB.rebuild([
 			{

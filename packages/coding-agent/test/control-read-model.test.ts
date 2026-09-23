@@ -44,7 +44,7 @@ describe("control read model", () => {
 		writeFileSync(join(control, "g", "tasks", "random.md"), "Status: READY\n");
 		writeFileSync(join(control, "g", "tasks", "T001-a.md"), "Status: READY\nObjective: A\n");
 		writeFileSync(join(control, "g", "tasks", "T001-b.md"), "Status: READY\nObjective: B\n");
-		setPiRoot(root, "legacy");
+		setPiRoot(root, "formal");
 		expect(listGoals(root).map((goal) => goal.goalId)).toEqual(["g", "h"]);
 		expect(() => listTasks(root, "g")).toThrow(DuplicateTaskIdentityError);
 		writeFileSync(join(control, "g", "tasks", "T001-b.md"), "");
