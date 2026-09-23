@@ -40,6 +40,12 @@ export class PiRootAlreadyActiveError extends Error {
 }
 
 let registry: SessionRegistry | undefined;
+export class PiRootUnavailableError extends Error {
+	constructor() {
+		super("PiRoot unavailable. Start with --root <path> or initialize a PiRoot in interactive mode.");
+		this.name = "PiRootUnavailableError";
+	}
+}
 function now(): number {
 	return Date.now();
 }
@@ -475,6 +481,7 @@ export function getSessionRegistry(): SessionRegistry | undefined {
 export function setSessionRegistryForTesting(value: SessionRegistry | undefined): void {
 	registry = value;
 }
+
 export function syncSessionRegistry(session: { id: string; file?: string; cwd: string; name?: string }): void {
 	registry?.upsert(session);
 }

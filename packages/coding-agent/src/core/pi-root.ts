@@ -11,11 +11,19 @@
  * A directory qualifies as a PiRoot when it contains the `.pi/` runtime directory.
  */
 
-import { existsSync, realpathSync, statSync } from "node:fs";
+import { accessSync, constants, existsSync, mkdirSync, realpathSync, statSync } from "node:fs";
 import { dirname, isAbsolute, join, resolve as nodeResolvePath, relative, sep } from "node:path";
 
 /** Marker directory that identifies a PiRoot. */
 export const PI_ROOT_MARKER = ".pi";
+
+/** Thrown when formal PiRoot initialization fails closed. */
+export class PiRootInitializationError extends Error {
+	constructor(message: string) {
+		super(message);
+		this.name = "PiRootInitializationError";
+	}
+}
 
 /** Thrown when PiRoot cannot be resolved. */
 export class PiRootNotFoundError extends Error {
@@ -24,11 +32,9 @@ export class PiRootNotFoundError extends Error {
 
 	constructor(options: { searchedFrom?: string; explicitRoot?: string }) {
 		const detail = options.explicitRoot
-			? `--root ${options.explicitRoot} does not contain a ${PI_ROOT_MARKER}/ directory`
+			? `cannot use --root ${options.explicitRoot}`
 			: `no ancestor of ${options.searchedFrom} contains a ${PI_ROOT_MARKER}/ directory`;
-		super(
-			`Could not determine PiRoot: ${detail}. Start Pi inside a workspace root that contains ${PI_ROOT_MARKER}/, or pass --root <path>.`,
-		);
+		super(`Could not determine PiRoot: ${detail}. Initialize the current directory or pass --root <path>.`);
 		this.name = "PiRootNotFoundError";
 		this.searchedFrom = options.searchedFrom;
 		this.explicitRoot = options.explicitRoot;
@@ -131,15 +137,72 @@ export function findPiRootFromCwd(startCwd: string): string | undefined {
  */
 export function resolvePiRootInfo(options: { explicitRoot?: string; cwd: string }): PiRootResolution {
 	const explicit = options.explicitRoot !== undefined && options.explicitRoot !== "";
-	const root = explicit ? canonicalizeAllowMissing(options.explicitRoot!) : findPiRootFromCwd(options.cwd);
-	if (root !== undefined && hasPiRootMarker(root)) {
+	if (explicit) {
+		const root = canonicalizePath(options.explicitRoot!);
+		if (!existsSync(root) || !isDirectory(root))
+			throw new PiRootInitializationError(`PiRoot does not exist or is not a directory: ${root}`);
+		try {
+			accessSync(root, constants.W_OK | constants.X_OK);
+		} catch {
+			throw new PiRootInitializationError(`PiRoot is not writable: ${root}`);
+		}
+		const marker = join(root, PI_ROOT_MARKER);
+		if (existsSync(marker) && !isDirectory(marker))
+			throw new PiRootInitializationError(`PiRoot marker is not a directory: ${marker}`);
 		return { root };
 	}
-	throw new PiRootNotFoundError(explicit ? { explicitRoot: options.explicitRoot } : { searchedFrom: options.cwd });
+	const root = findPiRootFromCwd(options.cwd);
+	if (root !== undefined) return { root };
+	throw new PiRootNotFoundError({ searchedFrom: options.cwd });
+}
+
+export function initializePiRoot(root: string): string {
+	const canonicalRoot = canonicalizePath(root);
+	if (!existsSync(canonicalRoot) || !isDirectory(canonicalRoot))
+		throw new PiRootInitializationError(`PiRoot does not exist or is not a directory: ${canonicalRoot}`);
+	try {
+		try {
+			accessSync(canonicalRoot, constants.W_OK | constants.X_OK);
+		} catch {
+			throw new PiRootInitializationError(`PiRoot is not writable: ${canonicalRoot}`);
+		}
+		const marker = join(canonicalRoot, PI_ROOT_MARKER);
+		if (existsSync(marker) && !isDirectory(marker))
+			throw new PiRootInitializationError(`PiRoot marker is not a directory: ${marker}`);
+		mkdirSync(marker, { recursive: true });
+		try {
+			accessSync(marker, constants.W_OK | constants.X_OK);
+		} catch {
+			throw new PiRootInitializationError(`PiRoot runtime directory is not writable: ${marker}`);
+		}
+		mkdirSync(join(marker, "state"), { recursive: true });
+		mkdirSync(join(marker, "sessions"), { recursive: true });
+	} catch (error) {
+		if (error instanceof PiRootInitializationError) throw error;
+		throw new PiRootInitializationError(`Cannot initialize PiRoot ${canonicalRoot}: ${String(error)}`);
+	}
+	return canonicalRoot;
 }
 
 export function resolvePiRoot(options: { explicitRoot?: string; cwd: string }): string {
 	return resolvePiRootInfo(options).root;
+}
+
+export async function resolveCliPiRoot(options: {
+	explicitRoot?: string;
+	cwd: string;
+	interactive: boolean;
+	confirmInitialize?: (root: string) => Promise<boolean>;
+}): Promise<string | undefined> {
+	if (options.explicitRoot !== undefined) {
+		const root = resolvePiRootInfo({ explicitRoot: options.explicitRoot, cwd: options.cwd }).root;
+		return initializePiRoot(root);
+	}
+	const discovered = findPiRootFromCwd(options.cwd);
+	if (discovered) return discovered;
+	if (!options.interactive || !options.confirmInitialize) return undefined;
+	if (!(await options.confirmInitialize(options.cwd))) return undefined;
+	return initializePiRoot(options.cwd);
 }
 
 /** True when `target` resolves to `root` itself or a descendant of it. */

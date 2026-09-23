@@ -17,6 +17,7 @@ function setup(): {
 	mkdirSync(join(root, ".pi"), { recursive: true });
 	setPiRoot(root);
 	const registry = new SessionRegistry(root);
+	registry.setCanonicalControlSessionId("controller");
 	const id = "d1";
 	const session = {
 		sessionManager: { getSessionId: () => id, getSessionName: () => undefined },
@@ -49,6 +50,7 @@ describe("close atomicity", () => {
 	it("removes the slot after post-commit cleanup failure", () => {
 		const state = setup();
 		state.registry.setInactive("d1");
+		state.registry.setCanonicalControlSessionId("controller");
 		state.pool.setFaults({ nextClose: true });
 		expect(() => state.pool.removeClosed("slot-1")).toThrow("runtime cleanup failure");
 		expect(state.pool.findBySessionId("d1")).toBeUndefined();
@@ -76,6 +78,7 @@ describe("close atomicity", () => {
 	it("completes a normal close with inactive registry and no slot", () => {
 		const state = setup();
 		state.pool.deactivate("slot-1");
+		state.registry.setCanonicalControlSessionId("controller");
 		state.pool.removeClosed("slot-1");
 		expect(state.pool.findBySessionId("d1")).toBeUndefined();
 		expect(state.registry.inactiveRows().map((row) => row.session_id)).toEqual(["d1"]);

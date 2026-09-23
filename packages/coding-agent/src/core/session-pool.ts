@@ -45,7 +45,7 @@ class RuntimeSessionSlot implements SessionSlot {
 		this.session = session;
 		this.services = services;
 		this.gitWorktreeRoot = gitWorktreeRoot;
-		this.activity = { busy: session.isStreaming, unread: false, mutationCapable: false };
+		this.activity = { busy: session.isStreaming ?? false, unread: false, mutationCapable: false };
 		this.unsubscribeActivity =
 			typeof session.subscribe === "function"
 				? session.subscribe((event) => {
@@ -122,7 +122,9 @@ export class SessionPool {
 	deactivate(slotId: string): void {
 		const slot = this.slots.get(slotId);
 		if (!slot) throw new Error(`Unknown session slot: ${slotId}`);
-		deactivateSessionRegistry(slot.session.sessionManager.getSessionId());
+		const manager = (slot.session as AgentSession & { sessionManager?: AgentSession["sessionManager"] })
+			.sessionManager;
+		if (manager) deactivateSessionRegistry(manager.getSessionId());
 	}
 
 	setFaults(faults: { nextClose?: boolean }): void {
@@ -175,12 +177,15 @@ export class SessionPool {
 		this.slots.set(id, slot);
 		if (this._foregroundSlotId === undefined) this._foregroundSlotId = id;
 		try {
-			syncSessionRegistry({
-				id: session.sessionManager.getSessionId(),
-				file: session.sessionFile,
-				cwd: slot.cwd,
-				name: session.sessionManager.getSessionName(),
-			});
+			const manager = (session as AgentSession & { sessionManager?: AgentSession["sessionManager"] }).sessionManager;
+			if (manager) {
+				syncSessionRegistry({
+					id: manager.getSessionId(),
+					file: session.sessionFile,
+					cwd: slot.cwd,
+					name: manager.getSessionName(),
+				});
+			}
 		} catch (error) {
 			this.slots.delete(id);
 			this._foregroundSlotId = previousForeground;
@@ -249,14 +254,18 @@ export class SessionPool {
 		try {
 			if (this.failNextClose) {
 				this.failNextClose = false;
-				throw new Error(`Injected runtime cleanup failure for ${slot.session.sessionManager.getSessionId()}`);
+				const manager = (slot.session as AgentSession & { sessionManager?: AgentSession["sessionManager"] })
+					.sessionManager;
+				throw new Error(`Injected runtime cleanup failure for ${manager?.getSessionId() ?? slotId}`);
 			}
 			slot.close();
 		} catch (error) {
 			cleanupError = error;
 		}
 		this.slots.delete(slotId);
-		if (this._foregroundSlotId === slotId) this._foregroundSlotId = undefined;
+		if (this._foregroundSlotId === slotId) {
+			this._foregroundSlotId = this.slots.keys().next().value;
+		}
 		this.updateConflicts();
 		if (cleanupError) throw cleanupError;
 		return slot;

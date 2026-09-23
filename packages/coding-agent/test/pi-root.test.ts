@@ -13,10 +13,13 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
 	hasPiRootMarker,
+	initializePiRoot,
 	isPathInsidePiRoot,
+	PiRootInitializationError,
 	PiRootNotFoundError,
 	PiRootPathError,
 	resolvePiRoot,
+	resolvePiRootInfo,
 	resolvePiRootRelativePath,
 	setPiRoot,
 } from "../src/core/pi-root.ts";
@@ -77,11 +80,37 @@ describe("PiRoot resolution", () => {
 		expect(resolvePiRoot({ cwd: nested })).toBe(root);
 	});
 
-	it("accepts .pi/ as the sole PiRoot marker", () => {
+	it("initializes an explicit root idempotently and creates only formal runtime paths", () => {
 		const root = makeDir(base, "pi-only");
-		mkdirSync(join(root, ".pi"), { recursive: true });
-		expect(resolvePiRoot({ explicitRoot: root, cwd: base })).toBe(root);
-		expect(resolvePiRoot({ cwd: root })).toBe(root);
+		expect(resolvePiRootInfo({ explicitRoot: root, cwd: base })).toEqual({ root });
+		expect(initializePiRoot(root)).toBe(root);
+		expect(initializePiRoot(root)).toBe(root);
+		for (const path of [join(root, ".pi"), join(root, ".pi", "state"), join(root, ".pi", "sessions")])
+			expect(existsSync(path)).toBe(true);
+		expect(existsSync(join(root, "control"))).toBe(false);
+	});
+
+	it("resolver accepts explicit existing roots before initialization", () => {
+		const plain = makeDir(base, "plain-explicit");
+		expect(resolvePiRootInfo({ explicitRoot: plain, cwd: base })).toEqual({ root: plain });
+		expect(existsSync(join(plain, ".pi"))).toBe(false);
+	});
+
+	it("rejects invalid initialization targets and a non-directory .pi marker", () => {
+		const missing = join(base, "missing");
+		expect(() => initializePiRoot(missing)).toThrow(PiRootInitializationError);
+		const fileMarkerRoot = makeDir(base, "file-marker");
+		writeFileSync(join(fileMarkerRoot, ".pi"), "not a directory");
+		expect(() => initializePiRoot(fileMarkerRoot)).toThrow(PiRootInitializationError);
+		const fileRoot = join(base, "file-root");
+		writeFileSync(fileRoot, "not a directory");
+		expect(() => initializePiRoot(fileRoot)).toThrow(PiRootInitializationError);
+	});
+
+	it("does not create a root while resolving", () => {
+		const root = makeDir(base, "pure-resolution");
+		expect(() => resolvePiRootInfo({ cwd: root })).toThrow(PiRootNotFoundError);
+		expect(existsSync(join(root, ".pi"))).toBe(false);
 	});
 
 	it("resolves from a nested directory without Task authority", () => {
@@ -96,13 +125,16 @@ describe("PiRoot resolution", () => {
 		expect(resolvePiRoot({ explicitRoot: other, cwd: base })).toBe(other);
 	});
 
-	it("rejects an explicit --root without .pi/", () => {
+	it("resolves an explicit root before initialization without filesystem mutation", () => {
 		const plain = makeDir(base, "plain");
-		expect(() => resolvePiRoot({ explicitRoot: plain, cwd: base })).toThrow(PiRootNotFoundError);
+		expect(resolvePiRoot({ explicitRoot: plain, cwd: base })).toBe(plain);
+		expect(existsSync(join(plain, ".pi"))).toBe(false);
 	});
 
 	it("rejects a nonexistent explicit --root", () => {
-		expect(() => resolvePiRoot({ explicitRoot: join(base, "nope"), cwd: base })).toThrow(PiRootNotFoundError);
+		expect(() => resolvePiRootInfo({ explicitRoot: join(base, "nope"), cwd: base })).toThrow(
+			PiRootInitializationError,
+		);
 	});
 
 	it("throws when no ancestor contains .pi/", () => {

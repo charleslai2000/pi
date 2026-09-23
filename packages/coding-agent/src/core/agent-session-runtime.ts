@@ -45,7 +45,7 @@ import type { CreateAgentSessionResult } from "./sdk.ts";
 import { assertSessionCwdExists } from "./session-cwd.ts";
 import { SessionManager } from "./session-manager.ts";
 import { SessionPool, type SessionSlot } from "./session-pool.ts";
-import { getSessionRegistry } from "./session-registry.ts";
+import { getSessionRegistry, PiRootUnavailableError } from "./session-registry.ts";
 
 /**
  * Result returned by runtime creation.
@@ -270,7 +270,7 @@ export class AgentSessionRuntime {
 
 	private associationRoot(): string {
 		const registry = getSessionRegistry();
-		if (!registry) throw new Error("Session registry is not initialized");
+		if (!registry) throw new PiRootUnavailableError();
 		return registry.getRoot();
 	}
 
@@ -329,15 +329,17 @@ export class AgentSessionRuntime {
 		);
 	}
 
-	private associationRecord(): AssociationRecord {
-		return readAssociations(this.associationRoot());
+	private tryAssociationRecord(): AssociationRecord | undefined {
+		const registry = getSessionRegistry();
+		return registry ? readAssociations(registry.getRoot()) : undefined;
 	}
 
 	listCurrentAssignments(): Array<
 		CurrentAssignment & { sessionName?: string; cwd?: string; runtimeState: "active" | "inactive" }
 	> {
 		const registry = getSessionRegistry();
-		const record = this.associationRecord();
+		const record = this.tryAssociationRecord();
+		if (!record) return [];
 		return record.current.map((assignment) => {
 			const row = registry?.rows().find((candidate) => candidate.session_id === assignment.sessionId);
 			return {
@@ -350,8 +352,9 @@ export class AgentSessionRuntime {
 	}
 
 	getTaskAssignment(goalId: string, taskId: string) {
-		readGoal(this.associationRoot(), goalId);
-		readTask(this.associationRoot(), goalId, taskId);
+		const root = this.associationRoot();
+		readGoal(root, goalId);
+		readTask(root, goalId, taskId);
 		return this.listCurrentAssignments().find(
 			(assignment) => assignment.goalId === goalId && assignment.taskId === taskId,
 		);
@@ -995,6 +998,7 @@ export class AgentSessionRuntime {
 	}
 
 	private async rebindAssignedTask(session: AgentSession): Promise<void> {
+		if (!getSessionRegistry()) return;
 		const assignment = this.getSessionAssignment(session.sessionManager.getSessionId());
 		if (!assignment) return;
 		const task = readTask(this.associationRoot(), assignment.goalId, assignment.taskId);
@@ -1218,10 +1222,10 @@ export class AgentSessionRuntime {
 		// Defense-in-depth: SessionManager.create also enforces this.
 		assertCwdInsidePiRoot(targetCwd);
 		const previousSessionFile = this.session.sessionFile;
-		const root = this.associationRoot();
-		const runtimeDir = getPiRootRuntimeDir(root);
-		if (!runtimeDir) throw new Error("PiRoot runtime directory is unavailable");
-		const sessionManager = SessionManager.create(targetCwd, join(runtimeDir, "sessions"));
+		const piRoot = getPiRoot();
+		const runtimeDir = piRoot ? getPiRootRuntimeDir(piRoot) : undefined;
+		const sessionDir = runtimeDir ? join(runtimeDir, "sessions") : undefined;
+		const sessionManager = SessionManager.create(targetCwd, sessionDir);
 		if (options?.parentSession) sessionManager.newSession({ parentSession: options.parentSession });
 		assertSessionCwdExists(sessionManager, this.cwd);
 		const result = await this.createRuntime({

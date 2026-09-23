@@ -48,7 +48,7 @@ import { applyHttpProxySettings, configureHttpDispatcher } from "./core/http-dis
 import { resolveCliModel, resolveModelScope, type ScopedModel } from "./core/model-resolver.ts";
 import { ModelRuntime } from "./core/model-runtime.ts";
 import { restoreStdout, takeOverStdout } from "./core/output-guard.ts";
-import { resolvePiRootInfo, setPiRoot } from "./core/pi-root.ts";
+import { resolveCliPiRoot, setPiRoot } from "./core/pi-root.ts";
 import { type AppMode, resolveProjectTrusted } from "./core/project-trust.ts";
 import type { CreateAgentSessionOptions } from "./core/sdk.ts";
 import {
@@ -658,17 +658,26 @@ export async function main(args: string[], options?: MainOptions) {
 	// SDK/embedded behavior is unchanged.
 	let piRoot: string | undefined;
 	try {
-		const resolved = resolvePiRootInfo({ explicitRoot: parsed.root, cwd });
-		piRoot = resolved.root;
+		piRoot = await resolveCliPiRoot({
+			explicitRoot: parsed.root,
+			cwd,
+			interactive: appMode === "interactive" && !parsed.help && parsed.listModels === undefined,
+			confirmInitialize: (root) =>
+				new Promise((resolve) => {
+					const prompt = createInterface({ input: process.stdin, output: process.stderr });
+					prompt.question(`No PiRoot found. Initialize ${root}/.pi/ here? [y/N] `, (answer) => {
+						prompt.close();
+						resolve(/^y(?:es)?$/i.test(answer.trim()));
+					});
+				}),
+		});
 	} catch (error: unknown) {
-		// Always surface PiRoot resolution failures: the CLI must not start
-		// without a known PiRoot when one is required.
 		console.error(chalk.red(`Error: ${error instanceof Error ? error.message : String(error)}`));
 		process.exit(1);
 	}
 	setPiRoot(piRoot);
-	const sessionRegistry = await initializeSessionRegistry(piRoot!);
-	process.once("exit", () => sessionRegistry.close());
+	const sessionRegistry = piRoot ? await initializeSessionRegistry(piRoot) : undefined;
+	if (sessionRegistry) process.once("exit", () => sessionRegistry.close());
 
 	// Run migrations (pass cwd for project-local migrations)
 	const { migratedAuthProviders: migratedProviders, deprecationWarnings } = runMigrations(cwd);
@@ -698,7 +707,7 @@ export async function main(args: string[], options?: MainOptions) {
 		(parsed.sessionDir ? normalizePath(parsed.sessionDir) : undefined) ??
 		(envSessionDir ? expandTildePath(envSessionDir) : undefined) ??
 		startupSettingsManager.getSessionDir();
-	let sessionManager = piRoot
+	let sessionManager = sessionRegistry
 		? await sessionRegistry.openCanonicalController(sessionDir, piRoot!)
 		: await createSessionManager(parsed, cwd, sessionDir, startupSettingsManager);
 	const missingSessionCwdIssue = getMissingSessionCwdIssue(sessionManager, cwd);
@@ -872,7 +881,7 @@ export async function main(args: string[], options?: MainOptions) {
 	});
 	time("createAgentSessionRuntime");
 	const initialSlot = runtime.sessionPool.getForeground();
-	sessionRegistry.upsert({
+	sessionRegistry?.upsert({
 		id: initialSlot.session.sessionManager.getSessionId(),
 		file: initialSlot.session.sessionFile,
 		cwd: initialSlot.cwd,
@@ -963,15 +972,15 @@ export async function main(args: string[], options?: MainOptions) {
 
 	if (appMode === "rpc") {
 		printTimings();
-		await runRpcMode(runtime, () => sessionRegistry.close());
-		sessionRegistry.close();
+		await runRpcMode(runtime, () => sessionRegistry?.close());
+		sessionRegistry?.close();
 	} else if (appMode === "interactive") {
 		const interactiveMode = new InteractiveMode(runtime, {
 			migratedProviders,
 			startupDiagnostics,
 			modelFallbackMessage,
 			autoTrustOnReloadCwd,
-			onRuntimeDisposed: () => sessionRegistry.close(),
+			onRuntimeDisposed: () => sessionRegistry?.close(),
 			initialMessage,
 			initialImages,
 			initialMessages: parsed.messages,
@@ -986,7 +995,7 @@ export async function main(args: string[], options?: MainOptions) {
 			// (Kitty keyboard protocol, device attributes, cell size) before restoring the terminal.
 			await new Promise((resolve) => setTimeout(resolve, 150));
 			interactiveMode.stop();
-			sessionRegistry.close();
+			sessionRegistry?.close();
 			stopThemeWatcher();
 			printTimings();
 			if (process.stdout.writableLength > 0) {
@@ -1007,14 +1016,14 @@ export async function main(args: string[], options?: MainOptions) {
 			messages: parsed.messages,
 			initialMessage,
 			initialImages,
-			onRuntimeDisposed: () => sessionRegistry.close(),
+			onRuntimeDisposed: () => sessionRegistry?.close(),
 		});
 		stopThemeWatcher();
 		restoreStdout();
 		if (exitCode !== 0) {
 			process.exitCode = exitCode;
 		}
-		sessionRegistry.close();
+		sessionRegistry?.close();
 		return;
 	}
 }

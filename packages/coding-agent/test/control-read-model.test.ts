@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
@@ -11,24 +11,11 @@ import {
 } from "../src/core/control/read-model.ts";
 import { setPiRoot } from "../src/core/pi-root.ts";
 
-const repoRoot = process.cwd();
-const fixtureRoot = join(repoRoot, "control");
-
 afterEach(() => setPiRoot(undefined));
 
 describe("control read model", () => {
-	it("discovers the real warm-multi-session Goal and Task without writing", () => {
-		const goal = readGoal(repoRoot, "warm-multi-session");
-		const task = readTask(repoRoot, "warm-multi-session", "T001");
-		expect(goal.goalId).toBe("warm-multi-session");
-		expect(existsSync(goal.goalFile)).toBe(true);
-		expect(goal.planFile).toBe(join(fixtureRoot, "warm-multi-session", "plan.md"));
-		expect(task.taskId).toBe("T001");
-		expect(task.slug).toBe("implement-and-freeze");
-		expect(task.status).toBe("DONE");
-		expect(task.objective).toContain("concurrent warm multi-session");
-		expect(listGoals(repoRoot).map((item) => item.goalId)).toContain("warm-multi-session");
-		expect(listTasks(repoRoot, "warm-multi-session")).toHaveLength(1);
+	it("requires an explicit or active PiRoot for Control Plane projections", () => {
+		expect(() => listGoals()).toThrow(/PiRoot is not set/);
 	});
 
 	it("rejects malformed, duplicate, missing, and escaping paths", () => {
@@ -57,10 +44,16 @@ describe("control read model", () => {
 		rmSync(base, { recursive: true, force: true });
 	});
 
-	it("does not mistake control documents for Goals or malformed files for Tasks", () => {
-		expect(listGoals(repoRoot).some((goal) => goal.goalId === "AGENTS.md" || goal.goalId === "frontier.md")).toBe(
-			false,
-		);
-		expect(() => readGoal(repoRoot, "missing-goal")).toThrow(ControlReadError);
+	it("returns an empty projection when an available Task authority has no Goals", () => {
+		const base = mkdtempSync(join("/tmp", "pi-control-empty-"));
+		const root = join(base, "project");
+		mkdirSync(join(root, ".pi"), { recursive: true });
+		mkdirSync(join(root, "control"), { recursive: true });
+		writeFileSync(join(root, "control", "AGENTS.md"), "instructions\n");
+		writeFileSync(join(root, "control", "frontier.md"), "# Frontier\n");
+		setPiRoot(root);
+		expect(listGoals(root)).toEqual([]);
+		expect(() => readGoal(root, "missing-goal")).toThrow(ControlReadError);
+		rmSync(base, { recursive: true, force: true });
 	});
 });

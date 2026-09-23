@@ -182,7 +182,7 @@ describe("/resume scope with real sessions", () => {
 		writeSession(namespaceDir, "sess-design", designDir, 1);
 		// A session from a different PiRoot, stored in the same namespace dir.
 		writeSession(namespaceDir, "sess-other", otherDir, 1);
-		// A legacy per-cwd session inside PiRoot.
+		// Legacy per-cwd transcripts are not discovered by formal PiRoot project-local storage.
 		const legacyDir = join(agentDir, "sessions", legacyDirName(designDir));
 		writeSession(legacyDir, "sess-legacy", designDir, 1);
 
@@ -193,7 +193,7 @@ describe("/resume scope with real sessions", () => {
 		const controlIds = fromControl.map((s) => s.id).sort();
 		expect(controlIds).toContain("sess-control");
 		expect(controlIds).toContain("sess-design");
-		expect(controlIds).toContain("sess-legacy");
+		expect(controlIds).not.toContain("sess-legacy");
 		expect(controlIds).not.toContain("sess-other");
 
 		// Foreground switches to /project/design: same visible set.
