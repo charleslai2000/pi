@@ -5,13 +5,7 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { canonicalizePath } from "../utils/paths.ts";
 import { readAssociations } from "./control/associations.ts";
-import {
-	getPiRoot,
-	getPiRootControlDir,
-	getPiRootRuntimeDir,
-	hasControlDirectory,
-	hasPiRootMarker,
-} from "./pi-root.ts";
+import { getPiRoot, getPiRootControlDir, getPiRootRuntimeDir, hasPiRootMarker } from "./pi-root.ts";
 import { type SessionInfo, SessionManager } from "./session-manager.ts";
 
 export type SessionRegistryRole = "controller" | "executor" | "unassigned";
@@ -72,11 +66,9 @@ export class SessionRegistry {
 		this.heartbeatIntervalMs = options.heartbeatIntervalMs ?? 10_000;
 		this.staleAfterMs = options.staleAfterMs ?? 30_000;
 		this.root = canonicalizePath(root);
-		if (!hasPiRootMarker(this.root) || !hasControlDirectory(this.root))
-			throw new Error(`PiRoot has no formal .pi/ and control/ layout: ${this.root}`);
-		const controlDir = getPiRootControlDir(this.root);
+		if (!hasPiRootMarker(this.root)) throw new Error(`PiRoot has no .pi/ runtime directory: ${this.root}`);
 		const runtimeDir = getPiRootRuntimeDir(this.root);
-		if (!controlDir || !runtimeDir) throw new Error(`PiRoot has no formal runtime/control layout: ${this.root}`);
+		if (!runtimeDir) throw new Error(`PiRoot has no runtime directory: ${this.root}`);
 		ensurePiRuntime(runtimeDir);
 		this.db = new DatabaseSync(registryPath(runtimeDir));
 		this.db.exec("PRAGMA busy_timeout=5000;");

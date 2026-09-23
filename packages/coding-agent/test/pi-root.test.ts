@@ -30,7 +30,7 @@ function makeDir(...segments: string[]): string {
 	return realpathSync(dir);
 }
 
-/** Create a PiRoot: a directory containing a `control/` marker. */
+/** Create a PiRoot: a directory containing a `.pi/` marker. */
 function makePiRoot(base: string, name: string): string {
 	const root = makeDir(base, name);
 	mkdirSync(join(root, ".pi"), { recursive: true });
@@ -72,10 +72,17 @@ describe("PiRoot resolution", () => {
 		setPiRoot(undefined);
 	});
 
-	it("resolves to the nearest ancestor containing .pi/ and control/", () => {
+	it("resolves to the nearest ancestor containing .pi/ without requiring control/", () => {
 		const root = makePiRoot(base, "project");
 		const nested = makeDir(root, "design", "sub");
 		expect(resolvePiRoot({ cwd: nested })).toBe(root);
+	});
+
+	it("accepts .pi/ as the sole PiRoot marker", () => {
+		const root = makeDir(base, "pi-only");
+		mkdirSync(join(root, ".pi"), { recursive: true });
+		expect(resolvePiRoot({ explicitRoot: root, cwd: base })).toBe(root);
+		expect(resolvePiRoot({ cwd: root })).toBe(root);
 	});
 
 	it("resolves from the control directory itself", () => {
@@ -99,7 +106,7 @@ describe("PiRoot resolution", () => {
 		expect(() => resolvePiRoot({ explicitRoot: join(base, "nope"), cwd: base })).toThrow(PiRootNotFoundError);
 	});
 
-	it("throws when no ancestor contains .pi/ and control/", () => {
+	it("throws when no ancestor contains .pi/", () => {
 		const plain = makeDir(base, "plain", "deep");
 		expect(() => resolvePiRoot({ cwd: plain })).toThrow(PiRootNotFoundError);
 	});

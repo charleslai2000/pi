@@ -8,7 +8,7 @@
  *   - the current foreground session cwd
  *   - `git rev-parse --show-toplevel` (a PiRoot may or may not be a Git repo)
  *
- * A directory qualifies as a formal PiRoot when it contains both `.pi/` runtime state and `control/` Task authority.
+ * A directory qualifies as a PiRoot when it contains `.pi/` runtime state. Task authority under `control/` is optional.
  */
 
 import { existsSync, realpathSync, statSync } from "node:fs";
@@ -125,12 +125,12 @@ export function hasControlDirectory(dir: string): boolean {
 
 /**
  * Walk from `startCwd` toward the filesystem root and return the nearest
- * formal ancestor containing `.pi/` and `control/`.
+ * ancestor containing `.pi/`.
  */
 export function findPiRootFromCwd(startCwd: string): string | undefined {
 	let current = canonicalizeAllowMissing(startCwd);
 	for (;;) {
-		if (hasPiRootMarker(current) && hasControlDirectory(current)) return current;
+		if (hasPiRootMarker(current)) return current;
 		const parent = dirname(current);
 		if (parent === current) return undefined;
 		current = parent;
@@ -141,14 +141,14 @@ export function findPiRootFromCwd(startCwd: string): string | undefined {
  * Resolve PiRoot.
  *
  * Order:
- *   1. Explicit `--root <path>` (must contain `.pi/` and `control/`).
- *   2. Nearest formal ancestor of `cwd`.
+ *   1. Explicit `--root <path>` (must contain `.pi/`).
+ *   2. Nearest ancestor of `cwd` containing `.pi/`.
  *   3. Failure.
  */
 export function resolvePiRootInfo(options: { explicitRoot?: string; cwd: string }): PiRootResolution {
 	const explicit = options.explicitRoot !== undefined && options.explicitRoot !== "";
 	const root = explicit ? canonicalizeAllowMissing(options.explicitRoot!) : findPiRootFromCwd(options.cwd);
-	if (root !== undefined && hasPiRootMarker(root) && hasControlDirectory(root)) {
+	if (root !== undefined && hasPiRootMarker(root)) {
 		return { root, controlDir: canonicalizePath(join(root, PI_ROOT_CONTROL_DIR)), mode: "formal" };
 	}
 	throw new PiRootNotFoundError(explicit ? { explicitRoot: options.explicitRoot } : { searchedFrom: options.cwd });

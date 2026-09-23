@@ -81,7 +81,18 @@ describe("SessionRegistry control plane", () => {
 		rmSync(base, { recursive: true, force: true });
 	});
 
-	it("rejects a control-only directory as a formal PiRoot", () => {
+	it("allows a PiRoot with .pi/ and no control/ directory", () => {
+		const base = mkdtempSync(join("/tmp", "pi-registry-no-control-"));
+		const root = join(base, "project");
+		mkdirSync(join(root, ".pi"), { recursive: true });
+		setPiRoot(root, "formal");
+		const registry = new SessionRegistry(root, { acquire: false });
+		expect(registry.getRoot()).toBe(root);
+		registry.close();
+		rmSync(base, { recursive: true, force: true });
+	});
+
+	it("rejects a directory with control/ but no .pi/ marker", () => {
 		const base = mkdtempSync(join("/tmp", "pi-registry-legacy-"));
 		const root = join(base, "project");
 		const control = join(root, "control");
