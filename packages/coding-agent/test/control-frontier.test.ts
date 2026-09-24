@@ -6,11 +6,12 @@ import { setPiRoot } from "../src/core/pi-root.ts";
 
 function fixture(): string {
 	const root = mkdtempSync(join("/tmp", "pi-frontier-"));
-	mkdirSync(join(root, "control", "warm-multi-session", "tasks"), { recursive: true });
-	writeFileSync(join(root, "control", "warm-multi-session", "goal.md"), "# Warm\n");
-	mkdirSync(join(root, "control", "warm-multi-session-2"));
-	writeFileSync(join(root, "control", "warm-multi-session-2", "goal.md"), "# Second\n");
-	writeFileSync(join(root, "control", "warm-multi-session", "tasks", "T001-work.md"), "Status: DONE\n");
+	mkdirSync(join(root, ".pi", "warm-multi-session"), { recursive: true });
+	writeFileSync(join(root, ".pi", "warm-multi-session", "goal.md"), "# Warm\n");
+	mkdirSync(join(root, ".pi", "warm-multi-session-2"));
+	writeFileSync(join(root, ".pi", "warm-multi-session-2", "goal.md"), "# Second\n");
+	writeFileSync(join(root, ".pi", "warm-multi-session", "T001-work.md"), "Status: DONE\n");
+	setPiRoot(root);
 	return root;
 }
 
@@ -43,13 +44,13 @@ describe("control frontier read/write model", () => {
 		];
 		writeFrontier(root, entries);
 		expect(readFrontier(root).entries).toEqual(entries);
-		expect(readFileSync(join(root, "control", "frontier.md"), "utf8")).toContain("## warm-multi-session\nTask: T001");
+		expect(readFileSync(join(root, ".pi", "frontier.md"), "utf8")).toContain("## warm-multi-session\nTask: T001");
 	});
 
 	it("fails fast for malformed syntax and references", () => {
 		const root = fixture();
 		const bad = (content: string): void => {
-			writeFileSync(join(root, "control", "frontier.md"), content);
+			writeFileSync(join(root, ".pi", "frontier.md"), content);
 			expect(() => readFrontier(root)).toThrow(FrontierError);
 		};
 		bad("# Frontier\n\n## warm-multi-session\nState: active\nState: deferred\n");
@@ -62,7 +63,7 @@ describe("control frontier read/write model", () => {
 
 	it("validates before atomic replacement and leaves no temporary file", () => {
 		const root = fixture();
-		const path = join(root, "control", "frontier.md");
+		const path = join(root, ".pi", "frontier.md");
 		writeFrontier(root, [{ goalId: "warm-multi-session", taskId: "T001", state: "active" }]);
 		const before = readFileSync(path);
 		expect(() => writeFrontier(root, [{ goalId: "warm-multi-session", taskId: "T999", state: "active" }])).toThrow(
@@ -71,7 +72,7 @@ describe("control frontier read/write model", () => {
 		expect(readFileSync(path)).toEqual(before);
 		writeFrontier(root, [{ goalId: "warm-multi-session", state: "deferred", blocker: "x" }]);
 		expect(readFileSync(path, "utf8")).toContain("State: deferred");
-		expect(readdirSync(join(root, "control")).filter((name) => name.includes(".frontier.md.")).length).toBe(0);
+		expect(readdirSync(join(root, ".pi")).filter((name) => name.includes(".frontier.md.")).length).toBe(0);
 		rmSync(root, { recursive: true, force: true });
 	});
 

@@ -1,17 +1,23 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
+import { fauxAssistantMessage, registerFauxProvider } from "@earendil-works/pi-ai/compat";
 import { afterEach, describe, expect, it } from "vitest";
-import { AgentSessionRuntime } from "../src/core/agent-session-runtime.ts";
+import type { AgentSession } from "../src/core/agent-session.ts";
+import { AgentSessionRuntime, type CreateAgentSessionRuntimeFactory } from "../src/core/agent-session-runtime.ts";
+import { createAgentSessionFromServices, createAgentSessionServices } from "../src/core/agent-session-services.ts";
+import { AuthStorage } from "../src/core/auth-storage.ts";
 import { readAssociations } from "../src/core/control/associations.ts";
 import { readExecutionAttempts } from "../src/core/control/execution-attempts.ts";
 import { readTask } from "../src/core/control/read-model.ts";
+import { ModelRuntime } from "../src/core/model-runtime.ts";
 import { setPiRoot } from "../src/core/pi-root.ts";
-import { getDefaultSessionDir } from "../src/core/session-manager.ts";
+import { getDefaultSessionDir, SessionManager } from "../src/core/session-manager.ts";
 import { SessionRegistry, setSessionRegistryForTesting } from "../src/core/session-registry.ts";
 
 class FakeSession {
 	readonly sessionManager = { getSessionId: () => this.id, getSessionName: () => this.id };
+	sessionFile: string | undefined;
 	readonly tools = new Map<string, { execute: (id: string, params: unknown) => Promise<unknown> }>();
 	activeTools: string[] = [];
 	messages: AgentMessage[] = [];
@@ -42,7 +48,10 @@ class FakeSession {
 		this.tools.set(tool.name, tool);
 		return () => this.tools.delete(tool.name);
 	}
-	setTaskSessionProtocol(): void {}
+	taskProtocol = "";
+	setTaskSessionProtocol(protocol: string): void {
+		this.taskProtocol = protocol;
+	}
 	getContextUsage() {
 		return this.contextUsage;
 	}
@@ -56,6 +65,12 @@ class FakeSession {
 	async prompt(message: string): Promise<void> {
 		this.prompts.push(message);
 	}
+	setSessionName(name: string): void {
+		this.sessionManager.getSessionName = () => name;
+	}
+	appendSystemPrompt(prompt: string): void {
+		this.prompts.push(prompt);
+	}
 	async sendCustomMessage(message: { content: string | unknown[] }): Promise<void> {
 		this.prompts.push(typeof message.content === "string" ? message.content : JSON.stringify(message.content));
 	}
@@ -68,101 +83,144 @@ class FakeSession {
 	setThinkingLevel(): void {}
 }
 
-function setup(): {
+async function setup(): Promise<{
 	root: string;
 	runtime: AgentSessionRuntime;
-	controller: FakeSession;
-	executor: FakeSession;
-	executor2: FakeSession;
-} {
+	controllerSession: AgentSession;
+	cleanupFaux: () => void;
+}> {
 	const root = mkdtempSync(join("/tmp", "pi-controller-tools-"));
-	mkdirSync(join(root, ".pi"), { recursive: true });
-	const taskDir = join(root, "control", "goal-a", "tasks");
+	mkdirSync(join(root, ".pi", "agents"), { recursive: true });
+	writeFileSync(join(root, ".pi", "agents", "coder.md"), "Coding profile prompt.\n");
+	writeFileSync(join(root, ".pi", "agents", "reviewer.md"), "Review profile prompt.\n");
+	const taskDir = join(root, ".pi", "goal-a");
 	mkdirSync(taskDir, { recursive: true });
-	writeFileSync(join(root, "control", "goal-a", "goal.md"), "# Goal A\n");
+	writeFileSync(join(taskDir, "goal.md"), "# Goal A\n");
 	setPiRoot(root);
-	const registry = new SessionRegistry(root);
-	setSessionRegistryForTesting(registry);
 	const sessionDir = getDefaultSessionDir(root);
 	mkdirSync(sessionDir, { recursive: true });
-	const sessions = [new FakeSession("controller"), new FakeSession("executor"), new FakeSession("executor2")];
-	for (const session of sessions) {
-		const file = join(sessionDir, `${session.sessionManager.getSessionId()}.jsonl`);
-		writeFileSync(
-			file,
-			`${JSON.stringify({ type: "session", version: 3, id: session.sessionManager.getSessionId(), timestamp: new Date().toISOString(), cwd: root })}\n`,
-		);
-		registry.upsert({
-			id: session.sessionManager.getSessionId(),
-			file,
+	const registry = new SessionRegistry(root);
+	setSessionRegistryForTesting(registry);
+	const faux = registerFauxProvider();
+	faux.setResponses([fauxAssistantMessage("Accepted T001"), fauxAssistantMessage("continue")]);
+	const cleanupFaux = () => faux.unregister();
+	const auth = AuthStorage.inMemory();
+	await auth.modify("faux", async () => ({ type: "api_key", key: "test-key" }));
+	const modelRuntime = await ModelRuntime.create({ credentials: auth, modelsPath: join(root, "models.json") });
+	const fauxModel = faux.getModel();
+	modelRuntime.registerProvider(fauxModel.provider, {
+		baseUrl: fauxModel.baseUrl,
+		api: fauxModel.api,
+		models: [
+			{
+				id: fauxModel.id,
+				name: fauxModel.name,
+				api: fauxModel.api,
+				reasoning: fauxModel.reasoning,
+				input: fauxModel.input,
+				cost: fauxModel.cost,
+				contextWindow: fauxModel.contextWindow,
+				maxTokens: fauxModel.maxTokens,
+				baseUrl: fauxModel.baseUrl,
+			},
+			{
+				id: "faster",
+				name: "faster",
+				api: fauxModel.api,
+				reasoning: fauxModel.reasoning,
+				input: fauxModel.input,
+				cost: fauxModel.cost,
+				contextWindow: 2000,
+				maxTokens: fauxModel.maxTokens,
+				baseUrl: fauxModel.baseUrl,
+			},
+		],
+	});
+	const controllerManager = SessionManager.create(root, sessionDir);
+	const controllerServices = await createAgentSessionServices({ cwd: root, agentDir: "/tmp/agent", modelRuntime });
+	const controllerSession = (
+		await createAgentSessionFromServices({ services: controllerServices, sessionManager: controllerManager })
+	).session;
+	registry.setCanonicalControlSessionId(controllerManager.getSessionId());
+	registry.upsert({
+		id: controllerManager.getSessionId(),
+		file: controllerManager.getSessionFile(),
+		cwd: root,
+		name: "Controller",
+	});
+	const createRuntime = (async ({ cwd, agentDir, sessionManager }) => {
+		const services = await createAgentSessionServices({ cwd, agentDir, modelRuntime });
+		const created = await createAgentSessionFromServices({ services, sessionManager, model: fauxModel });
+		return { ...created, services, diagnostics: [] };
+	}) as CreateAgentSessionRuntimeFactory;
+	const runtime = new AgentSessionRuntime(controllerSession, controllerServices, createRuntime);
+	Object.assign(runtime, {
+		_services: {
+			agentDir: "/tmp/agent",
 			cwd: root,
-			name: session.sessionManager.getSessionName(),
-		});
-	}
-	registry.setCanonicalControlSessionId("controller");
-	const pool = {
-		findBySessionId: (id: string) => {
-			const session = sessions.find((candidate) => candidate.sessionManager.getSessionId() === id);
-			return session
-				? {
-						session,
-						activity: { busy: false },
-						services: {
-							modelRuntime: {
-								getModel: (provider: string, modelId: string) =>
-									provider === "faux" && modelId === "faster"
-										? { id: modelId, contextWindow: 2000 }
-										: undefined,
-							},
-						},
-					}
-				: undefined;
-		},
-	};
-	const runtime = Object.assign(Object.create(AgentSessionRuntime.prototype) as AgentSessionRuntime, {
-		_sessionPool: pool,
-		taskSessionBindings: new Map(),
-		taskSessionAdmission: new Map(),
-		taskRunGenerations: new Map(),
-		controllerNoticeKeys: new Set(),
-		suppressExecutorSettlement: new Set(),
-		createRuntime: async () => {
-			throw new Error("test does not create a new Executor");
+			modelRuntime,
+			model: fauxModel,
+			settingsManager: { getRetrySettings: () => ({}) },
 		},
 	});
 	Object.defineProperty(runtime, "associationRoot", { value: () => root });
-	return { root, runtime, controller: sessions[0]!, executor: sessions[1]!, executor2: sessions[2]! };
+	return { root, runtime, controllerSession, cleanupFaux };
 }
 
-async function call(session: FakeSession, name: string, params: unknown): Promise<unknown> {
-	const tool = session.tools.get(name);
+function toolText(result: unknown): string {
+	if (typeof result !== "object" || result === null || !("content" in result)) return "";
+	const content = (result as { content: Array<{ type: string; text?: string }> }).content;
+	return content
+		.filter((part) => part.type === "text")
+		.map((part) => part.text ?? "")
+		.join("");
+}
+
+async function call(session: FakeSession | AgentSession, name: string, params: unknown): Promise<unknown> {
+	const tool =
+		session instanceof FakeSession
+			? session.tools.get(name)
+			: session.agent.state.tools.find((candidate) => candidate.name === name);
 	if (!tool) throw new Error(`missing ${name}`);
 	return tool.execute("test", params);
 }
 
+let cleanupFaux: (() => void) | undefined;
+
 afterEach(() => {
+	cleanupFaux?.();
+	cleanupFaux = undefined;
 	setSessionRegistryForTesting(undefined);
 	setPiRoot(undefined);
 });
 
 describe("Controller Task/Executor tools", () => {
 	it("keeps tool sets separate and supports create, revise, inspect, dispatch, notice, and close", async () => {
-		const value = setup();
-		(value.runtime as unknown as { installControllerTools: (session: FakeSession) => void }).installControllerTools(
-			value.controller,
-		);
-		expect(value.controller.activeTools).toEqual(
+		const value = await setup();
+		cleanupFaux = value.cleanupFaux;
+		expect(value.controllerSession.getActiveToolNames()).toEqual(
 			expect.arrayContaining([
 				"create_task",
 				"revise_task",
+				"list_agents",
+				"inspect_agent",
 				"inspect_task",
 				"dispatch_task",
 				"notice_executor",
 				"close_task",
 			]),
 		);
-		expect(value.executor.activeTools).toEqual([]);
-		await call(value.controller, "create_task", {
+		expect(readAssociations(value.root).current).toEqual([]);
+		const catalog = JSON.parse(toolText(await call(value.controllerSession, "list_agents", {}))) as Array<{
+			agentSlug: string;
+		}>;
+		expect(catalog.map((agent) => agent.agentSlug)).toContain("coder");
+		expect(catalog.map((agent) => agent.agentSlug)).not.toContain("orchestrator");
+		const inspected = JSON.parse(
+			toolText(await call(value.controllerSession, "inspect_agent", { agentSlug: "coder" })),
+		) as { prompt: string };
+		expect(inspected.prompt).toContain("Coding profile prompt.");
+		await call(value.controllerSession, "create_task", {
 			goalId: "goal-a",
 			taskId: "T001",
 			slug: "native",
@@ -171,79 +229,52 @@ describe("Controller Task/Executor tools", () => {
 			inputs: "input",
 			completion: "done",
 		});
-		await call(value.controller, "create_task", {
+		await call(value.controllerSession, "create_task", {
 			goalId: "goal-a",
 			taskId: "T002",
 			slug: "dependent",
 			objective: "Dependent work",
 			completion: "done",
 		});
-		await call(value.controller, "set_task_dependencies", {
+		await call(value.controllerSession, "set_task_dependencies", {
 			goalId: "goal-a",
 			taskId: "T002",
 			prerequisites: [{ goalId: "goal-a", taskId: "T001" }],
 		});
-		const frontierBefore = await call(value.controller, "inspect_frontier", {});
+		const frontierBefore = await call(value.controllerSession, "inspect_frontier", {});
 		expect(JSON.stringify(frontierBefore)).toContain("T001");
 		expect(JSON.stringify(frontierBefore)).not.toContain("T002");
 		await expect(
-			call(value.controller, "dispatch_task", { goalId: "goal-a", taskId: "T002", sessionId: "executor2" }),
+			call(value.controllerSession, "dispatch_task", { goalId: "goal-a", taskId: "T002", agent: "coder" }),
 		).rejects.toThrow("prerequisites");
 		expect(readAssociations(value.root).current).toEqual([]);
-		await call(value.controller, "revise_task", { goalId: "goal-a", taskId: "T001", objective: "Do revised work" });
-		const inspected = await call(value.controller, "inspect_task", { goalId: "goal-a", taskId: "T001" });
-		expect(JSON.stringify(inspected)).toContain("Do revised work");
-		expect(
-			(
-				value.runtime as unknown as { getExecutorContextSnapshot: (id: string) => unknown }
-			).getExecutorContextSnapshot("executor"),
-		).toMatchObject({
-			currentContextUsage: 120,
-			effectiveContextLimit: 1000,
-			remainingHeadroom: 880,
-			budgetState: "available",
-			compaction: { active: false, usageKnown: true },
+		await call(value.controllerSession, "revise_task", {
+			goalId: "goal-a",
+			taskId: "T001",
+			objective: "Do revised work",
 		});
-		await call(value.controller, "dispatch_task", { goalId: "goal-a", taskId: "T001", sessionId: "executor" });
-		expect(value.executor.activeTools).toEqual(["task_gate"]);
-		value.executor.contextUsage = { tokens: 1000, contextWindow: 1000, percent: 100 };
-		// Exhaustion is observation-only; switching is an explicit Controller choice below.
-		expect(
-			(
-				value.runtime as unknown as { getExecutorContextSnapshot: (id: string) => { budgetState: string } }
-			).getExecutorContextSnapshot("executor")?.budgetState,
-		).toBe("exhausted");
-		value.executor.contextUsage = { tokens: null, contextWindow: 1000, percent: null };
-		expect(
-			(
-				value.runtime as unknown as { getExecutorContextSnapshot: (id: string) => { budgetState: string } }
-			).getExecutorContextSnapshot("executor")?.budgetState,
-		).toBe("unknown");
+		const inspectedTask = await call(value.controllerSession, "inspect_task", { goalId: "goal-a", taskId: "T001" });
+		expect(JSON.stringify(inspectedTask)).toContain("Do revised work");
+		await call(value.controllerSession, "dispatch_task", { goalId: "goal-a", taskId: "T001", agent: "coder" });
+		const executorId = readAssociations(value.root).current[0]!.sessionId;
+		expect(value.runtime.sessionPool.getForeground().session.sessionManager.getSessionId()).toBe(executorId);
+		expect(value.runtime.sessionPool.findBySessionId(executorId)?.cwd).toBe(value.root);
+		const executor = value.runtime.sessionPool.findBySessionId(executorId)!.session;
+		expect(executor.getActiveToolNames()).toEqual(["task_gate"]);
+		expect(executor.getActiveToolNames()).not.toContain("create_task");
 		expect(readTask(value.root, "goal-a", "T001").status).toBe("READY");
-		await call(value.controller, "switch_executor_model", { executor_id: "executor", model: "faux/faster" });
-		expect(value.executor.activeTools).toEqual(["task_gate"]);
-		await call(value.controller, "notice_executor", { sessionId: "executor", message: "Continue and decide." });
-		expect(value.executor.prompts.at(-1)).toContain("Continue and decide");
-		await call(value.executor, "task_gate", { decision: "accept" });
-		value.controller.isStreaming = true;
-		value.executor.messages.push({
-			role: "assistant",
-			content: [
-				{
-					type: "text",
-					text: '<pi-executor-stop>{"reason":"terminated","result":"partial","remaining":"continue"}</pi-executor-stop>',
-				},
-			],
-			stopReason: "stop",
-		} as AgentMessage);
-		value.executor.emit("agent_settled");
-		await new Promise((resolve) => setImmediate(resolve));
-		expect(value.controller.prompts.at(-1)).toContain("status=DEFERRED");
-		expect(readTask(value.root, "goal-a", "T001").status).toBe("DEFERRED");
-		await call(value.controller, "dispatch_task", { goalId: "goal-a", taskId: "T001", sessionId: "executor2" });
-		expect(value.executor2.activeTools).toEqual(["task_gate"]);
-		await call(value.controller, "close_task", { goalId: "goal-a", taskId: "T001", outcome: "cancelled" });
-		await call(value.controller, "create_task", {
+		await call(value.controllerSession, "switch_executor_model", {
+			executor_id: executorId,
+			model: "faux/faster",
+		});
+		expect(executor.getActiveToolNames()).toEqual(["task_gate"]);
+		const gate = executor.agent.state.tools.find((tool) => tool.name === "task_gate")!;
+		await gate.execute("test", { decision: "accept" });
+		expect(executor.getActiveToolNames()).toEqual(
+			expect.arrayContaining(["task_memory", "read", "write", "edit", "bash"]),
+		);
+		expect(executor.getActiveToolNames()).not.toContain("create_task");
+		await call(value.controllerSession, "create_task", {
 			goalId: "goal-a",
 			taskId: "T003",
 			slug: "review",
@@ -251,16 +282,19 @@ describe("Controller Task/Executor tools", () => {
 			inputs: "Target: goal-a/T001; result: partial; check acceptance and risks",
 			completion: "Record PASS or findings in this review Task",
 		});
-		await call(value.controller, "set_task_dependencies", {
+		await call(value.controllerSession, "close_task", { goalId: "goal-a", taskId: "T001", outcome: "cancelled" });
+		await call(value.controllerSession, "set_task_dependencies", {
 			goalId: "goal-a",
 			taskId: "T003",
 			prerequisites: [{ goalId: "goal-a", taskId: "T001" }],
 		});
-		const reviewFrontier = await call(value.controller, "inspect_frontier", {});
+		const reviewFrontier = await call(value.controllerSession, "inspect_frontier", {});
 		expect(JSON.stringify(reviewFrontier)).not.toContain("T003");
 		expect(readTask(value.root, "goal-a", "T001").status).toBe("CANCELLED");
 		expect(readAssociations(value.root).current).toEqual([]);
 		expect(readExecutionAttempts(value.root).attempts).toEqual([]);
+		await value.runtime.dispose();
+		value.controllerSession.dispose();
 		rmSync(value.root, { recursive: true, force: true });
 	});
 });

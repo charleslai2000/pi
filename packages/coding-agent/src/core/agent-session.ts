@@ -391,6 +391,8 @@ export class AgentSession {
 
 	private _baseSystemPromptOptions!: NormalizedBuildSystemPromptOptions;
 	private _taskSessionProtocol?: string;
+	private _appendedSystemPrompt?: string;
+	private _suppressLoadedProjectContext = false;
 	/** Prompt options after before_agent_start mutations for the active run. */
 	private _runSystemPromptOptions?: NormalizedBuildSystemPromptOptions;
 
@@ -1109,6 +1111,23 @@ export class AgentSession {
 		this._rebuildSystemPrompt(this.getActiveToolNames());
 	}
 
+	appendSystemPrompt(prompt: string): void {
+		this._taskSessionProtocol = [this._taskSessionProtocol, prompt].filter(Boolean).join("\n\n");
+		this._rebuildSystemPrompt(this.getActiveToolNames());
+	}
+
+	/** Replace extension-provided appended prompt context without changing protocol instructions. */
+	setAppendedSystemPrompt(prompt: string | undefined, options: { suppressLoadedProjectContext?: boolean } = {}): void {
+		this._appendedSystemPrompt = prompt;
+		this._suppressLoadedProjectContext = options.suppressLoadedProjectContext === true;
+		this._rebuildSystemPrompt(this.getActiveToolNames());
+	}
+
+	/** Return Pi's automatically loaded cwd instructions in root-to-leaf order. */
+	getProjectInstructions(): ReadonlyArray<{ path: string; content: string }> {
+		return this._resourceLoader.getAgentsFiles().agentsFiles;
+	}
+
 	setScopedModels(scopedModels: Array<{ model: Model<any>; thinkingLevel?: ThinkingLevel }>): void {
 		this._scopedModels = scopedModels;
 	}
@@ -1155,6 +1174,7 @@ export class AgentSession {
 		const appendSystemPrompt = [
 			...loaderAppendSystemPrompt,
 			...(this._taskSessionProtocol ? [this._taskSessionProtocol] : []),
+			...(this._appendedSystemPrompt ? [this._appendedSystemPrompt] : []),
 		].join("\n\n");
 		const loadedSkills = this._resourceLoader.getSkills().skills;
 		const loadedContextFiles = this._resourceLoader.getAgentsFiles().agentsFiles;
@@ -1162,7 +1182,7 @@ export class AgentSession {
 		this._baseSystemPromptOptions = normalizeBuildSystemPromptOptions({
 			cwd: this._cwd,
 			skills: loadedSkills,
-			contextFiles: loadedContextFiles,
+			contextFiles: this._suppressLoadedProjectContext ? [] : loadedContextFiles,
 			customPrompt: loaderSystemPrompt,
 			appendSystemPrompt,
 			selectedTools: validToolNames,

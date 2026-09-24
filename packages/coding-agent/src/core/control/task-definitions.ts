@@ -27,7 +27,7 @@ export function createGoal(piRoot: string, goalId: string, definition: GoalDefin
 	if (!/^[A-Za-z0-9][A-Za-z0-9-]*$/.test(goalId)) throw new Error("Invalid Goal identity");
 	const directory = join(resolveControlDirectory(piRoot), goalId);
 	if (existsSync(directory)) throw new Error(`Goal already exists: ${goalId}`);
-	mkdirSync(join(directory, "tasks"), { recursive: true });
+	mkdirSync(directory, { recursive: true });
 	writeFileSync(
 		join(directory, "goal.md"),
 		[`# ${definition.title ?? goalId}`, `Status: ${definition.status ?? "READY"}`, ""].join("\n"),
@@ -94,8 +94,7 @@ export function createTask(
 	const completion = validateText(definition.completion, "completion", true)!;
 	const constraints = validateText(definition.constraints, "constraints");
 	const inputs = validateText(definition.inputs, "inputs");
-	const directory = join(readTaskDirectory(piRoot, goalId), "tasks");
-	mkdirSync(directory, { recursive: true });
+	const directory = readTaskDirectory(piRoot, goalId);
 	const path = join(directory, `${taskId}-${slug}.md`);
 	const content = [
 		`Status: READY`,

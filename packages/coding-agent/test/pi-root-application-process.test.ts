@@ -25,13 +25,12 @@ function makeProject(): { base: string; root: string; agentDir: string } {
 	const base = mkdtempSync(join("/tmp", "pi-root-process-"));
 	const root = join(base, "project");
 	mkdirSync(join(root, ".pi"), { recursive: true });
-	mkdirSync(join(root, "control"), { recursive: true });
 	mkdirSync(join(root, "design"), { recursive: true });
 	return { base, root, agentDir: join(base, "agent") };
 }
 
 function db(root: string): DatabaseSync {
-	return new DatabaseSync(join(root, ".pi", "state", "control.sqlite3"));
+	return new DatabaseSync(join(root, ".pi", "control.sqlite3"));
 }
 
 function persistedSession(root: string, cwdName: string): string {
@@ -245,7 +244,7 @@ describe("PiRoot application cross-process lifecycle", () => {
 		const first = await start(project);
 		const original = { id: first.ready.canonicalSessionId, file: first.ready.sessionFile };
 		const database = db(project.root);
-		const controlDir = join(project.root, ".pi", "state");
+		const controlDir = join(project.root, ".pi");
 		database.close();
 		expect(await commandAndExit(first.child, "shutdown")).toBe(0);
 		for (const suffix of ["", "-wal", "-shm"]) rmSync(join(controlDir, `control.sqlite3${suffix}`), { force: true });

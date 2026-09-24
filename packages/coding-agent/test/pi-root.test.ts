@@ -85,8 +85,7 @@ describe("PiRoot resolution", () => {
 		expect(resolvePiRootInfo({ explicitRoot: root, cwd: base })).toEqual({ root });
 		expect(initializePiRoot(root)).toBe(root);
 		expect(initializePiRoot(root)).toBe(root);
-		for (const path of [join(root, ".pi"), join(root, ".pi", "state"), join(root, ".pi", "sessions")])
-			expect(existsSync(path)).toBe(true);
+		for (const path of [join(root, ".pi"), join(root, ".pi", "sessions")]) expect(existsSync(path)).toBe(true);
 		expect(existsSync(join(root, "control"))).toBe(false);
 	});
 

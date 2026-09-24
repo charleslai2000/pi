@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fauxAssistantMessage, registerFauxProvider } from "@earendil-works/pi-ai/compat";
@@ -24,9 +24,9 @@ describe("PiRoot application startup", () => {
 	it("creates exactly one canonical control slot from an executor launch root", async () => {
 		const base = mkdtempSync(join(tmpdir(), "pi-root-application-"));
 		const root = join(base, "project");
-		mkdirSync(join(root, ".pi"), { recursive: true });
-		mkdirSync(join(root, "control"), { recursive: true });
+		mkdirSync(join(root, ".pi", "agents"), { recursive: true });
 		mkdirSync(join(root, "design"), { recursive: true });
+		writeFileSync(join(root, ".pi", "agents", "orchestrator.md"), "Canonical Controller prompt.\n");
 		const agentDir = join(base, "agent");
 		const faux = registerFauxProvider();
 		faux.setResponses([fauxAssistantMessage("ready")]);
@@ -76,7 +76,9 @@ describe("PiRoot application startup", () => {
 		});
 		expect(application.poolSize).toBe(1);
 		expect(application.foregroundSessionId).toBe(application.canonicalControlSessionId);
-		expect(application.foregroundCwd).toBe(root);
+		expect(application.foregroundCwd).toBe(join(root, ".pi"));
+		expect(application.runtimeHost.session.sessionManager.getCwd()).toBe(join(root, ".pi"));
+		expect(application.runtimeHost.session.systemPrompt).toContain("Canonical Controller prompt.");
 		expect(application.registry.activeRows().map((row) => row.session_id)).toEqual([
 			application.canonicalControlSessionId,
 		]);

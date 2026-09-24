@@ -35,7 +35,7 @@ import {
 	createCompactionSummaryMessage,
 	createCustomMessage,
 } from "./messages.ts";
-import { getPiRoot, getPiRootRuntimeDir, isPathInsidePiRoot, PiRootPathError } from "./pi-root.ts";
+import { getPiRoot, isPathInsidePiRoot, PiRootPathError } from "./pi-root.ts";
 export const CURRENT_SESSION_VERSION = 3;
 
 export interface SessionHeader {
@@ -510,6 +510,16 @@ function getDefaultSessionDirPath(cwd: string, agentDir: string = getDefaultAgen
 	const namespaceRoot = getPiRoot() ?? resolvePath(cwd);
 	const resolvedAgentDir = resolvePath(agentDir);
 	const safePath = `--${namespaceRoot.replace(/^[/\\]/, "").replace(/[/\\:]/g, "-")}--`;
+	return join(resolvedAgentDir, "sessions", safePath);
+}
+
+export function getPiRootSessionDir(root: string, agentDir: string = getDefaultAgentDir()): string {
+	return getDefaultSessionDirPath(root, agentDir);
+}
+
+function getLegacyPiRootSessionDir(root: string, agentDir: string = getDefaultAgentDir()): string {
+	const resolvedAgentDir = resolvePath(agentDir);
+	const safePath = `--${root.replace(/^[/\\]/, "").replace(/[/\\:]/g, "-")}--`;
 	return join(resolvedAgentDir, "sessions", safePath);
 }
 
@@ -1243,6 +1253,10 @@ export class SessionManager {
 		return entry.id;
 	}
 
+	setSessionName(name: string): void {
+		this.appendSessionInfo(name);
+	}
+
 	/** Get the current session name from the latest session_info entry, if any. */
 	getSessionName(): string | undefined {
 		// Walk entries in reverse to find the latest session_info entry.
@@ -1834,8 +1848,14 @@ export class SessionManager {
 	static findById(cwd: string, id: string, sessionDir?: string): string | undefined {
 		const piRoot = getPiRoot();
 		const dir = sessionDir ? normalizePath(sessionDir) : getDefaultSessionDir(cwd);
-
-		const candidateDirs = new Set<string>([dir]);
+		const legacyCwdDir = !sessionDir && piRoot ? getDefaultSessionDirPath(cwd) : dir;
+		const candidateDirs = new Set<string>(
+			sessionDir
+				? [dir, getLegacyPiRootSessionDir(piRoot ?? cwd)]
+				: piRoot
+					? [dir, getLegacyPiRootSessionDir(piRoot), legacyCwdDir, join(piRoot, ".pi", "sessions")]
+					: [dir],
+		);
 
 		for (const scanDir of candidateDirs) {
 			try {
@@ -1942,18 +1962,26 @@ export class SessionManager {
 			return sortSessionInfos(sessions.filter((s) => includePiRoot(s.cwd)));
 		}
 
-		const sessionsDir = piRoot ? join(getPiRootRuntimeDir(piRoot)!, "sessions") : getSessionsDir();
-
-		try {
-			if (!existsSync(sessionsDir)) return [];
-			const entries = await readdir(sessionsDir, { withFileTypes: true });
-			const dirs = entries
-				.filter((entry) => entry.isDirectory() || entry.isSymbolicLink())
-				.map((entry) => join(sessionsDir, entry.name));
-			for (const file of entries.filter((entry) => entry.isFile() && entry.name.endsWith(".jsonl"))) {
-				dirs.push(join(sessionsDir, file.name));
+		const sessionsDirs = piRoot
+			? [...new Set([getPiRootSessionDir(piRoot), getLegacyPiRootSessionDir(piRoot)])]
+			: [getSessionsDir()];
+		const discoveredDirs = new Set<string>();
+		const directSessionFiles: string[] = [];
+		for (const sessionsDir of sessionsDirs) {
+			try {
+				if (!existsSync(sessionsDir)) continue;
+				const entries = await readdir(sessionsDir, { withFileTypes: true });
+				for (const entry of entries) {
+					const candidate = join(sessionsDir, entry.name);
+					if (entry.isDirectory() || entry.isSymbolicLink()) discoveredDirs.add(candidate);
+					else if (entry.isFile() && entry.name.endsWith(".jsonl")) directSessionFiles.push(candidate);
+				}
+			} catch {
+				// A missing/unreadable optional namespace does not hide other PiRoot session locations.
 			}
-
+		}
+		const dirs = [...discoveredDirs, ...directSessionFiles];
+		try {
 			const dirFiles = await mapWithConcurrency(
 				dirs,
 				MAX_CONCURRENT_SESSION_DISCOVERY_LOADS,

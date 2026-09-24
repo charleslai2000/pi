@@ -1,6 +1,6 @@
 import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { basename, dirname, join, relative, resolve } from "node:path";
-import { getPiRoot, getPiRootControlDir, isPathInsidePiRoot } from "../pi-root.ts";
+import { getPiRoot, getPiRootRuntimeDir, isPathInsidePiRoot } from "../pi-root.ts";
 
 export interface GoalRecord {
 	readonly goalId: string;
@@ -54,9 +54,11 @@ function canonical(path: string): string {
 
 function controlDirectory(piRoot: string): string {
 	const root = canonical(piRoot);
-	const resolved = getPiRootControlDir(root);
-	if (!resolved || !existsSync(resolved) || !statSync(resolved).isDirectory())
-		throw new ControlReadError(`Task authority directory is unavailable for PiRoot: ${root}`);
+	const resolved = getPiRootRuntimeDir(root);
+	if (!resolved || !existsSync(resolved))
+		throw new ControlReadError(`PiRoot authority directory is unavailable: ${root}`);
+	if (!statSync(resolved).isDirectory())
+		throw new ControlReadError(`PiRoot authority directory is not a directory: ${root}`);
 	return canonical(resolved);
 }
 
@@ -104,10 +106,7 @@ function title(content: string): string | undefined {
 }
 
 function parseGoal(goalId: string, directory: string): GoalRecord {
-	const goalFile = assertControlPath(
-		join(directory, "goal.md"),
-		controlDirectory(getPiRoot() ?? dirname(dirname(directory))),
-	);
+	const goalFile = assertControlPath(join(directory, "goal.md"), dirname(directory));
 	if (!existsSync(goalFile) || !statSync(goalFile).isFile())
 		throw new ControlReadError(`Goal directory has no goal.md: ${goalId}`);
 	const content = readText(goalFile);
@@ -182,12 +181,10 @@ export function readGoal(piRoot: string, goalId: string): GoalRecord {
 
 export function listTasks(piRoot: string, goalId: string): TaskRecord[] {
 	const goal = readGoal(piRoot, goalId);
-	const tasksDir = join(goal.directory, "tasks");
-	if (!existsSync(tasksDir)) return [];
 	const controlDir = resolveControlDirectory(piRoot);
-	const files = readdirSync(tasksDir, { withFileTypes: true })
+	const files = readdirSync(goal.directory, { withFileTypes: true })
 		.filter((entry) => entry.isFile() && /^T\d+-[^/]+\.md$/.test(entry.name))
-		.map((entry) => assertControlPath(join(tasksDir, entry.name), controlDir));
+		.map((entry) => assertControlPath(join(goal.directory, entry.name), controlDir));
 	const byId = new Map<string, string[]>();
 	for (const path of files) {
 		const id = /^((?:T)\d+)-/.exec(basename(path))![1]!;

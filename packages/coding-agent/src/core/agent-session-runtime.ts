@@ -3,6 +3,7 @@ import { basename, join, parse, resolve } from "node:path";
 import type { AgentMessage, AgentTool } from "@earendil-works/pi-agent-core";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import { resolvePath } from "../utils/paths.ts";
+import { listAgentProfiles, resolveAgentProfile } from "./agent-profiles.ts";
 import type { AgentSession } from "./agent-session.ts";
 import type { AgentSessionRuntimeDiagnostic, AgentSessionServices } from "./agent-session-services.ts";
 import {
@@ -33,6 +34,7 @@ import {
 } from "./control/task-mutations.ts";
 import { isTerminalTaskStatus, parseTaskStatus } from "./control/task-status.ts";
 import { type ControlTaskView, getTaskControlView, listFrontierControlViews } from "./control/view.ts";
+import { buildExecutionTaskContext, forkExecutionSession } from "./execution-session.ts";
 import type {
 	ProjectTrustContext,
 	ReplacedSessionContext,
@@ -40,7 +42,7 @@ import type {
 	SessionStartEvent,
 } from "./extensions/index.ts";
 import { emitSessionShutdownEvent } from "./extensions/runner.ts";
-import { assertCwdInsidePiRoot, assertSessionCwdInsidePiRoot, getPiRoot, getPiRootRuntimeDir } from "./pi-root.ts";
+import { assertCwdInsidePiRoot, assertSessionCwdInsidePiRoot, getPiRoot } from "./pi-root.ts";
 import type { CreateAgentSessionResult } from "./sdk.ts";
 import { assertSessionCwdExists } from "./session-cwd.ts";
 import { SessionManager } from "./session-manager.ts";
@@ -115,6 +117,10 @@ function parseExecutorStopEnvelope(messages: readonly AgentMessage[]): ExecutorS
 const CONTROLLER_SESSION_PROTOCOL = [
 	"You are the canonical Controller Session for this PiRoot.",
 	"Controller is a policy LLM: runtime delivers factual Task/Executor notices and atomic tools, but never chooses orchestration policy for you.",
+	"You decide whether a Task needs a specialized Agent and what contained cwd is appropriate; simple Tasks may use generic execution.",
+	"Use list_agents to inspect the available Agent catalog and inspect_agent to read a candidate prompt when useful. Choose based on Goal, Plan, Task facts, and PiRoot .pi/AGENTS.md policy.",
+	"Review, test, debugging, and other specialist work are conditional judgments for you, not automatic Task-type routes. Runtime never maps Task types to Agents or chooses cwd.",
+	"Agent and cwd are parameters for the current Task tenure only; they create no Task authority.",
 	"When a Task-change notice arrives, inspect facts with inspect_task and, when useful, inspect_frontier before deciding.",
 	"Use notice_executor to continue or correct an existing Executor only when the facts justify it.",
 	"Use switch_executor_model only when an explicit model change is justified; it preserves the same Executor Session and is unavailable while that Session is running.",
@@ -344,7 +350,8 @@ export class AgentSessionRuntime {
 			const row = registry?.rows().find((candidate) => candidate.session_id === assignment.sessionId);
 			return {
 				...assignment,
-				sessionName: row?.name ?? undefined,
+				agentSlug: row?.agent_slug ?? undefined,
+				sessionName: row?.agent_slug ?? row?.name ?? undefined,
 				cwd: row?.cwd,
 				runtimeState: row?.runtime_state ?? "inactive",
 			};
@@ -642,11 +649,54 @@ export class AgentSessionRuntime {
 		);
 		this.controllerTool(
 			_session,
-			"dispatch_task",
-			"Assign a READY or DEFERRED Task to an Executor Session and start admission.",
+			"list_agents",
+			"List available Pi Agent profiles without returning full prompt bodies. Project profiles override global profiles.",
+			{ type: "object", properties: {}, additionalProperties: false } as AgentTool["parameters"],
+			async () => {
+				const registry = getSessionRegistry();
+				if (!registry) throw new PiRootUnavailableError();
+				return text(JSON.stringify(listAgentProfiles({ piRoot: registry.getRoot() })));
+			},
+		);
+		this.controllerTool(
+			_session,
+			"inspect_agent",
+			"Inspect one available Pi Agent profile, including its prompt and model/variant metadata.",
 			{
 				type: "object",
-				properties: { goalId: { type: "string" }, taskId: { type: "string" }, sessionId: { type: "string" } },
+				properties: { agentSlug: { type: "string" } },
+				required: ["agentSlug"],
+				additionalProperties: false,
+			} as AgentTool["parameters"],
+			async (_id, raw) => {
+				const p = raw as { agentSlug: string };
+				const registry = getSessionRegistry();
+				if (!registry) throw new PiRootUnavailableError();
+				const profile = resolveAgentProfile(p.agentSlug, { piRoot: registry.getRoot() });
+				return text(
+					JSON.stringify({
+						agentSlug: profile.agentSlug,
+						source: profile.path.startsWith(join(registry.getRoot(), ".pi", "agents")) ? "project" : "global",
+						model: profile.model,
+						variant: profile.variant,
+						description: profile.description ?? profile.prompt.split(/\\s+/).slice(0, 24).join(" "),
+						prompt: profile.prompt,
+					}),
+				);
+			},
+		);
+		this.controllerTool(
+			_session,
+			"dispatch_task",
+			"Fork a fresh ordinary Pi Session for this Task, optionally selecting an Agent profile and contained cwd, then start Task admission.",
+			{
+				type: "object",
+				properties: {
+					goalId: { type: "string" },
+					taskId: { type: "string" },
+					agent: { type: "string" },
+					cwd: { type: "string" },
+				},
 				required: ["goalId", "taskId"],
 				additionalProperties: false,
 			} as AgentTool["parameters"],
@@ -659,30 +709,77 @@ export class AgentSessionRuntime {
 					throw new Error(`Task prerequisites are not satisfied: ${task.goalId}/${task.taskId}`);
 				if (this.getTaskAssignment(task.goalId, task.taskId))
 					throw new Error(`Task already has a valid assignment: ${task.goalId}/${task.taskId}`);
-				let target = typeof p.sessionId === "string" ? this._sessionPool.findBySessionId(p.sessionId) : undefined;
-				if (p.sessionId !== undefined && !target)
-					throw new Error(`Executor Session is not live: ${String(p.sessionId)}`);
-				if (!target) {
-					const runtimeDir = getPiRootRuntimeDir(this.associationRoot());
-					if (!runtimeDir) throw new Error("PiRoot runtime directory is unavailable");
-					const manager = SessionManager.create(this.cwd, join(runtimeDir, "sessions"));
-					if (manager.getSessionFile() && !existsSync(manager.getSessionFile()!)) manager.persistSessionHeader();
-					const result = await this.createRuntime({
-						cwd: this.cwd,
-						agentDir: this.services.agentDir,
-						sessionManager: manager,
-					});
-					target = this._sessionPool.adopt(result.session, result.services);
-				}
-				await assignTaskToSession(
+				if (p.agent !== undefined && typeof p.agent !== "string") throw new Error("agent must be a profile slug");
+				if (typeof p.agent === "string")
+					resolveAgentProfile(p.agent, { piRoot: getSessionRegistry()?.getRoot() ?? this.associationRoot() });
+				if (p.cwd !== undefined && typeof p.cwd !== "string") throw new Error("cwd must be a path");
+				const registry = getSessionRegistry();
+				if (!registry) throw new PiRootUnavailableError();
+				const sourceSessionFile = this.session.sessionFile;
+				if (!sourceSessionFile) throw new Error("Controller Session must be persisted before dispatch");
+				const execution = await forkExecutionSession({
+					request: {
+						task: { goalId: task.goalId, taskId: task.taskId },
+						agentSlug: p.agent as string | undefined,
+						cwd: (p.cwd as string | undefined) ?? registry.getRoot(),
+					},
+					piRoot: registry.getRoot(),
+					sourceSessionFile,
+					agentDir: this.services.agentDir,
+					modelRuntime: this.services.modelRuntime,
+					createRuntime: this.createRuntime,
+				});
+				const target = this._sessionPool.adopt(execution.session, execution.services);
+				const assigned = await assignTaskToSession(
 					this.associationRoot(),
 					task.goalId,
 					task.taskId,
 					target.session.sessionManager.getSessionId(),
 				);
+				getSessionRegistry()?.upsert({
+					id: target.session.sessionManager.getSessionId(),
+					file: target.session.sessionFile,
+					cwd: target.cwd,
+					name: typeof p.agent === "string" ? p.agent : "execution",
+					agentSlug: typeof p.agent === "string" ? p.agent : undefined,
+					taskId: task.taskId,
+					assignmentGeneration: assigned.record.current.find(
+						(item) => item.goalId === task.goalId && item.taskId === task.taskId,
+					)?.generation,
+				});
+				getSessionRegistry()?.setAgentProfile(
+					target.session.sessionManager.getSessionId(),
+					typeof p.agent === "string" ? p.agent : undefined,
+				);
 				getSessionRegistry()?.refreshRoles();
 				await this.startAssignedTask(task.goalId, task.taskId);
-				return text(`Dispatched ${task.goalId}/${task.taskId} to ${target.session.sessionManager.getSessionId()}`);
+				target.session.setAppendedSystemPrompt(
+					[
+						...(execution.profileSlug
+							? [
+									`Agent profile (${execution.profileSlug}):\n${resolveAgentProfile(execution.profileSlug, { piRoot: registry.getRoot() }).prompt}`,
+								]
+							: []),
+						target.session
+							.getProjectInstructions()
+							.map(
+								(file) =>
+									`<project_instructions path="${file.path}">\n${file.content}\n</project_instructions>`,
+							)
+							.join("\n\n"),
+						`Controller-facing Task selection context: ${task.goalId}/${task.taskId}; agent=${execution.profileSlug ?? "execution"}; cwd=${target.cwd}`,
+						`Assignment generation: ${assigned.record.current.find((item) => item.goalId === task.goalId && item.taskId === task.taskId)?.generation ?? "unknown"}`,
+						buildExecutionTaskContext(registry.getRoot(), task.goalId, task.taskId),
+						`Execution working directory: ${target.cwd}`,
+					]
+						.filter(Boolean)
+						.join("\n\n"),
+					{ suppressLoadedProjectContext: true },
+				);
+				this._sessionPool.setForeground(target.id);
+				return text(
+					`Dispatched ${task.goalId}/${task.taskId} to ${target.session.sessionManager.getSessionId()} (tenure ${assigned.record.current.find((item) => item.goalId === task.goalId && item.taskId === task.taskId)?.generation ?? "unknown"})`,
+				);
 			},
 		);
 		this.controllerTool(
@@ -778,6 +875,8 @@ export class AgentSessionRuntime {
 			"inspect_task",
 			"set_task_dependencies",
 			"inspect_frontier",
+			"list_agents",
+			"inspect_agent",
 			"dispatch_task",
 			"switch_executor_model",
 			"notice_executor",
@@ -955,6 +1054,7 @@ export class AgentSessionRuntime {
 		slot.session.setTaskSessionProtocol(
 			[
 				"This is a long-lived assigned Task Session.",
+				...(options?.admitted ? ["Continue the assigned Task using its existing Task instructions."] : []),
 				"Task Markdown is the lifecycle SSOT and durable memory; chat history is working memory, not the only authority.",
 				"Users may participate normally at any time. Settling does not complete or unassign the Task.",
 				"First call task_gate with accept or reject. If accepted, the Task becomes ACTIVE.",
@@ -995,6 +1095,16 @@ export class AgentSessionRuntime {
 			removeMemoryTool();
 		});
 		if (!options?.admitted) await slot.session.prompt(payload, { expandPromptTemplates: false, source: "extension" });
+		const registry = getSessionRegistry();
+		registry?.upsert({
+			id: assignment.sessionId,
+			file: slot.session.sessionFile,
+			cwd: slot.cwd || registry.getRoot(),
+			name: registry.rows().find((row) => row.session_id === assignment.sessionId)?.agent_slug ?? "execution",
+			taskId,
+			assignmentGeneration: assignment.generation,
+			agentSlug: registry.rows().find((row) => row.session_id === assignment.sessionId)?.agent_slug ?? undefined,
+		});
 	}
 
 	private async rebindAssignedTask(session: AgentSession): Promise<void> {
@@ -1222,10 +1332,7 @@ export class AgentSessionRuntime {
 		// Defense-in-depth: SessionManager.create also enforces this.
 		assertCwdInsidePiRoot(targetCwd);
 		const previousSessionFile = this.session.sessionFile;
-		const piRoot = getPiRoot();
-		const runtimeDir = piRoot ? getPiRootRuntimeDir(piRoot) : undefined;
-		const sessionDir = runtimeDir ? join(runtimeDir, "sessions") : undefined;
-		const sessionManager = SessionManager.create(targetCwd, sessionDir);
+		const sessionManager = SessionManager.create(targetCwd);
 		if (options?.parentSession) sessionManager.newSession({ parentSession: options.parentSession });
 		assertSessionCwdExists(sessionManager, this.cwd);
 		const result = await this.createRuntime({
@@ -1424,6 +1531,7 @@ export class AgentSessionRuntime {
 		row?: import("./session-registry.ts").RegistryRow;
 		slot: SessionSlot;
 		task?: { goalId: string; taskId: string; status?: string };
+		assignment?: CurrentAssignment & { agentSlug?: string };
 	}> {
 		const registry = getSessionRegistry();
 		if (!registry) return this._sessionPool.list().map((slot) => ({ slot }));
@@ -1434,6 +1542,7 @@ export class AgentSessionRuntime {
 			return {
 				row,
 				slot,
+				assignment: assignment ? { ...assignment, agentSlug: row.agent_slug ?? undefined } : undefined,
 				task: assignment
 					? {
 							goalId: assignment.goalId,

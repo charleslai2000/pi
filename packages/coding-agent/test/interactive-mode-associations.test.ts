@@ -11,8 +11,8 @@ import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
 
 function makeFixture(): { root: string; sessionDir: string; d1: string; d2: string; control: string } {
 	const root = mkdtempSync(join("/tmp", "pi-interactive-associations-"));
-	const control = join(root, "control");
-	const taskDir = join(control, "goal-a", "tasks");
+	const control = join(root, ".pi");
+	const taskDir = join(control, "goal-a");
 	mkdirSync(join(root, ".pi"), { recursive: true });
 	mkdirSync(taskDir, { recursive: true });
 	writeFileSync(join(control, "goal-a", "goal.md"), "# Goal A\n");
@@ -80,14 +80,14 @@ describe("InteractiveMode association commands", () => {
 		const status = vi.fn();
 		const error = vi.fn();
 		const submit = commandContext(runtime, status, error);
-		const taskBefore = readFileSync(join(value.control, "goal-a", "tasks", "T001-work.md"));
+		const taskBefore = readFileSync(join(value.control, "goal-a", "T001-work.md"));
 		await submit("/assign goal-a/T001");
 		let record = readAssociations(value.root);
 		expect(record.current).toEqual([
 			expect.objectContaining({ goalId: "goal-a", taskId: "T001", sessionId: value.d1 }),
 		]);
 		expect(record.history).toHaveLength(1);
-		expect(readFileSync(join(value.control, "goal-a", "tasks", "T001-work.md"))).toEqual(taskBefore);
+		expect(readFileSync(join(value.control, "goal-a", "T001-work.md"))).toEqual(taskBefore);
 		await submit("/assign goal-a/T001");
 		expect(readAssociations(value.root).history).toHaveLength(1);
 
@@ -134,7 +134,7 @@ describe("InteractiveMode association commands", () => {
 		for (const input of [
 			"/assign ../T001",
 			"/assign /goal-a/T001",
-			"/assign control/goal-a/tasks/T001.md",
+			"/assign .pi/goal-a/T001.md",
 			"/assign goal-a/T001/extra",
 			"/assign missing/T001",
 			"/assign goal-a/T999",
@@ -148,7 +148,7 @@ describe("InteractiveMode association commands", () => {
 	it("assigns an explicit foreground canonical control Session through /assign", async () => {
 		const value = makeFixture();
 		const controlId = "canonical-control";
-		const controlCwd = join(value.root, "control");
+		const controlCwd = join(value.root, ".pi");
 		writeFileSync(
 			join(value.sessionDir, `${controlId}.jsonl`),
 			`${JSON.stringify({ type: "session", version: 3, id: controlId, timestamp: new Date().toISOString(), cwd: controlCwd })}\n`,

@@ -203,12 +203,8 @@ function validateReference(piRoot: string, goalId: string, taskId: string, sessi
 	try {
 		readGoal(piRoot, goalId);
 		readTask(piRoot, goalId, taskId);
-		const runtimeDir = getPiRootRuntimeDir(piRoot);
-		const sessionFile = runtimeDir
-			? SessionManager.findById(piRoot, sessionId, join(runtimeDir, "sessions"))
-			: undefined;
-		if (!sessionFile && !SessionManager.findById(piRoot, sessionId))
-			throw new Error(`durable Session not found: ${sessionId}`);
+		const sessionFile = SessionManager.findById(piRoot, sessionId);
+		if (!sessionFile) throw new Error(`durable Session not found: ${sessionId}`);
 	} catch (error) {
 		throw new AssociationError(`Invalid association reference ${goalId}/${taskId}/${sessionId}: ${String(error)}`);
 	}
@@ -301,12 +297,8 @@ function validateMutationIdentity(piRoot: string, goalId: string, taskId: string
 	readGoal(piRoot, goalId);
 	readTask(piRoot, goalId, taskId);
 	if (sessionId !== undefined) {
-		const runtimeDir = getPiRootRuntimeDir(piRoot);
-		const sessionFile = runtimeDir
-			? SessionManager.findById(piRoot, sessionId, join(runtimeDir, "sessions"))
-			: undefined;
-		if (!sessionFile && !SessionManager.findById(piRoot, sessionId))
-			throw new AssociationError(`Durable Session not found: ${sessionId}`);
+		const sessionFile = SessionManager.findById(piRoot, sessionId);
+		if (!sessionFile) throw new AssociationError(`Durable Session not found: ${sessionId}`);
 		const registry = getSessionRegistry();
 		if (registry?.canonicalControlSessionId() === sessionId)
 			throw new AssociationError(`Canonical Controller cannot be assigned as an Executor: ${sessionId}`);

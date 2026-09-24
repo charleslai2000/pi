@@ -16,8 +16,9 @@ Pi historically treated `control/` as part of PiRoot discovery and placed the ca
 - RPC, print and any non-TTY startup never prompt or implicitly initialize. If no marker exists, they continue standalone.
 - SDK/embedded use may leave PiRoot unset.
 - Do not infer roots from `control/`, Git roots, arbitrary files, or later foreground Session cwd.
-- The registry, assignments, transcripts, and canonical Controller Session live under `.pi/`. Controller identity is durable registry metadata. If the registry database is lost, preserve old transcript files but do not guess which historical Session was canonical; create a new canonical Controller.
-- Task Goal/Plan/Task authority may reside in the conventional `control/` directory but is optional. PiRoot discovery never creates that directory. Control Plane operations requiring absent Task authority fail clearly without preventing ordinary Pi use.
+- The Pi-native Control Plane authority layout is frozen by [ADR-0002](ADR-0002-pi-native-control-authority.md): Goal/Plan/Task Markdown lives directly under `<PiRoot>/.pi/<goal-id>/`, with `control.sqlite3` as ignored runtime state. No `control/` directory is used.
+- Controller identity is durable registry metadata. If the registry database is lost, preserve old transcript files but do not guess which historical Session was canonical; create a new canonical Controller.
+- Project authority documents are version-controlled; machine runtime state is excluded. PiRoot discovery never creates authority documents.
 
 ## Consequences
 

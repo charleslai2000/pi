@@ -13,19 +13,19 @@ import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
 function fixture(): { root: string; sessionDir: string; sessionId: string } {
 	const root = mkdtempSync(join("/tmp", "pi-control-view-"));
 	mkdirSync(join(root, ".pi"), { recursive: true });
-	mkdirSync(join(root, "control", "goal-a", "tasks"), { recursive: true });
-	writeFileSync(join(root, "control", "goal-a", "goal.md"), "# Goal A\n");
+	mkdirSync(join(root, ".pi", "goal-a"), { recursive: true });
+	writeFileSync(join(root, ".pi", "goal-a", "goal.md"), "# Goal A\n");
 	writeFileSync(
-		join(root, "control", "goal-a", "tasks", "T001-work.md"),
+		join(root, ".pi", "goal-a", "T001-work.md"),
 		"Status: ACTIVE\nWork area: design\nObjective: integrate\n",
 	);
-	writeFileSync(join(root, "control", "goal-a", "tasks", "T002-work.md"), "Status: READY\n");
-	mkdirSync(join(root, "control", "goal-b", "tasks"), { recursive: true });
-	writeFileSync(join(root, "control", "goal-b", "goal.md"), "# Goal B\n");
-	writeFileSync(join(root, "control", "goal-b", "tasks", "T004-work.md"), "Status: DONE\n");
-	mkdirSync(join(root, "control", "goal-c", "tasks"), { recursive: true });
-	writeFileSync(join(root, "control", "goal-c", "goal.md"), "# Goal C\n");
-	writeFileSync(join(root, "control", "goal-c", "tasks", "T002-work.md"), "Status: READY\n");
+	writeFileSync(join(root, ".pi", "goal-a", "T002-work.md"), "Status: READY\n");
+	mkdirSync(join(root, ".pi", "goal-b"), { recursive: true });
+	writeFileSync(join(root, ".pi", "goal-b", "goal.md"), "# Goal B\n");
+	writeFileSync(join(root, ".pi", "goal-b", "T004-work.md"), "Status: DONE\n");
+	mkdirSync(join(root, ".pi", "goal-c"), { recursive: true });
+	writeFileSync(join(root, ".pi", "goal-c", "goal.md"), "# Goal C\n");
+	writeFileSync(join(root, ".pi", "goal-c", "T002-work.md"), "Status: READY\n");
 	setPiRoot(root);
 	const sessionId = "d1";
 	const sessionDir = getDefaultSessionDir(root);
@@ -87,7 +87,7 @@ describe("combined control view", () => {
 				},
 			],
 		});
-		const before = readFileSync(join(value.root, "control", "goal-a", "tasks", "T001-work.md"));
+		const before = readFileSync(join(value.root, ".pi", "goal-a", "T001-work.md"));
 		const view = getTaskControlView(value.root, "goal-a", "T001");
 		expect(view.taskStatus).toBe("ACTIVE");
 		expect(view.frontier).toEqual(expect.objectContaining({ state: "active", next: "Validate integration" }));
@@ -99,7 +99,7 @@ describe("combined control view", () => {
 			}),
 		);
 		expect(view.warnings).toEqual([]);
-		expect(readFileSync(join(value.root, "control", "goal-a", "tasks", "T001-work.md"))).toEqual(before);
+		expect(readFileSync(join(value.root, ".pi", "goal-a", "T001-work.md"))).toEqual(before);
 
 		const views = listFrontierControlViews(value.root);
 		expect(views.map((entry) => entry.taskId)).toEqual(["T001", "T002", "T004"]);

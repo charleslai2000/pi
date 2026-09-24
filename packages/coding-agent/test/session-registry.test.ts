@@ -63,16 +63,43 @@ describe("SessionRegistry control plane", () => {
 		registry.rebuild(rows);
 		const first = logicalRows(registry);
 		for (const file of ["control.sqlite3", "control.sqlite3-wal", "control.sqlite3-shm"]) {
-			rmSync(join(root, ".pi", "state", file), { force: true });
+			rmSync(join(root, ".pi", file), { force: true });
 		}
 		registry.close();
-		expect(existsSync(join(root, ".pi", "state", "control.sqlite3"))).toBe(false);
+		expect(existsSync(join(root, ".pi", "control.sqlite3"))).toBe(false);
 		const rebuilt = new SessionRegistry(root);
 		rebuilt.rebuild(rows);
 		expect(logicalRows(rebuilt)).toEqual(first);
 		expect(rebuilt.rows().every((row) => row.runtime_state === "inactive")).toBe(true);
 		rebuilt.upsert({ id: "b", file: rows[1]!.path, cwd: experiments, name: "science" });
 		expect(rebuilt.rows().find((row) => row.session_id === "b")?.runtime_state).toBe("active");
+		expect(rebuilt.rows().find((row) => row.session_id === "b")).toMatchObject({
+			agent_slug: null,
+			task_id: null,
+			assignment_generation: null,
+		});
+		rebuilt.rebuild(rows);
+		expect(rebuilt.rows().find((row) => row.session_id === "b")).toMatchObject({
+			agent_slug: null,
+			task_id: null,
+			assignment_generation: null,
+			runtime_state: "inactive",
+		});
+		rebuilt.upsert({
+			id: "b",
+			file: rows[1]!.path,
+			cwd: experiments,
+			name: "coder",
+			agentSlug: "coder",
+			taskId: "T001",
+			assignmentGeneration: 3,
+		});
+		expect(rebuilt.rows().find((row) => row.session_id === "b")).toMatchObject({
+			agent_slug: "coder",
+			task_id: "T001",
+			assignment_generation: 3,
+			runtime_state: "active",
+		});
 		expect(rebuilt.rows().filter((row) => row.runtime_state === "active")).toHaveLength(1);
 		rebuilt.close();
 		rmSync(base, { recursive: true, force: true });

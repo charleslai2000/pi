@@ -1,8 +1,8 @@
 import { execFileSync } from "node:child_process";
 import { realpathSync } from "node:fs";
-import type { AgentSession } from "./agent-session.ts";
+import type { AgentSession, AgentSessionEvent } from "./agent-session.ts";
 import type { AgentSessionServices } from "./agent-session-services.ts";
-import { deactivateSessionRegistry, syncSessionRegistry } from "./session-registry.ts";
+import { deactivateSessionRegistry, syncSessionAgentProfile, syncSessionRegistry } from "./session-registry.ts";
 
 export interface SessionActivity {
 	busy: boolean;
@@ -13,6 +13,8 @@ export interface SessionActivity {
 export type SessionActivityEvent =
 	| { slot: SessionSlot; type: "started" | "settled" | "completed"; outcome?: "success" | "error" }
 	| { type: "conflict"; worktreeRoot: string; slots: readonly SessionSlot[] };
+
+export type SessionActivityListener = (event: AgentSessionEvent) => void;
 
 export interface SessionSlot {
 	readonly id: string;
@@ -176,8 +178,8 @@ export class SessionPool {
 		);
 		this.slots.set(id, slot);
 		if (this._foregroundSlotId === undefined) this._foregroundSlotId = id;
+		const manager = (session as AgentSession & { sessionManager?: AgentSession["sessionManager"] }).sessionManager;
 		try {
-			const manager = (session as AgentSession & { sessionManager?: AgentSession["sessionManager"] }).sessionManager;
 			if (manager) {
 				syncSessionRegistry({
 					id: manager.getSessionId(),
@@ -185,10 +187,13 @@ export class SessionPool {
 					cwd: slot.cwd,
 					name: manager.getSessionName(),
 				});
+				const profile = /Agent profile \(([a-z][a-z0-9-]*)\):/.exec(session.systemPrompt ?? "")?.[1];
+				syncSessionAgentProfile(manager.getSessionId(), profile);
 			}
 		} catch (error) {
 			this.slots.delete(id);
 			this._foregroundSlotId = previousForeground;
+			if (manager) deactivateSessionRegistry(manager.getSessionId());
 			slot.close();
 			this.updateConflicts();
 			throw error;

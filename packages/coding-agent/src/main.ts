@@ -34,6 +34,7 @@ import { createProjectTrustContext } from "./cli/project-trust.ts";
 import { selectSession } from "./cli/session-picker.ts";
 import { shouldRunFirstTimeSetup, showFirstTimeSetup, showStartupSelector } from "./cli/startup-ui.ts";
 import { APP_NAME, ENV_SESSION_DIR, expandTildePath, getAgentDir, getPackageDir, VERSION } from "./config.ts";
+import { resolveAgentProfile } from "./core/agent-profiles.ts";
 import { type CreateAgentSessionRuntimeFactory, createAgentSessionRuntime } from "./core/agent-session-runtime.ts";
 import {
 	type AgentSessionRuntimeDiagnostic,
@@ -881,6 +882,10 @@ export async function main(args: string[], options?: MainOptions) {
 	});
 	time("createAgentSessionRuntime");
 	const initialSlot = runtime.sessionPool.getForeground();
+	if (sessionRegistry?.canonicalControlSessionId() === initialSlot.session.sessionManager.getSessionId()) {
+		const profile = resolveAgentProfile("orchestrator", { piRoot: piRoot!, controller: true });
+		initialSlot.session.appendSystemPrompt(profile.prompt);
+	}
 	sessionRegistry?.upsert({
 		id: initialSlot.session.sessionManager.getSessionId(),
 		file: initialSlot.session.sessionFile,

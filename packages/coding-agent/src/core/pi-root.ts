@@ -170,13 +170,12 @@ export function initializePiRoot(root: string): string {
 		if (existsSync(marker) && !isDirectory(marker))
 			throw new PiRootInitializationError(`PiRoot marker is not a directory: ${marker}`);
 		mkdirSync(marker, { recursive: true });
+		mkdirSync(join(marker, "sessions"), { recursive: true });
 		try {
 			accessSync(marker, constants.W_OK | constants.X_OK);
 		} catch {
 			throw new PiRootInitializationError(`PiRoot runtime directory is not writable: ${marker}`);
 		}
-		mkdirSync(join(marker, "state"), { recursive: true });
-		mkdirSync(join(marker, "sessions"), { recursive: true });
 	} catch (error) {
 		if (error instanceof PiRootInitializationError) throw error;
 		throw new PiRootInitializationError(`Cannot initialize PiRoot ${canonicalRoot}: ${String(error)}`);
@@ -274,8 +273,8 @@ export function getPiRootRuntimeDir(root: string | undefined = activePiRoot): st
 export function assertManagedControlMutationAllowed(target: string): void {
 	const root = activePiRoot;
 	if (!root) return;
-	const control = getPiRootControlDir(root);
 	const runtime = getPiRootRuntimeDir(root);
+	const control = runtime;
 	if (!control || !runtime) return;
 	const candidate = canonicalizeAllowMissing(target);
 	const inControl =
@@ -290,7 +289,7 @@ export function assertManagedControlMutationAllowed(target: string): void {
 
 export function getPiRootControlDir(root: string | undefined = activePiRoot): string | undefined {
 	if (root === undefined) return undefined;
-	return canonicalizeAllowMissing(join(root, "control"));
+	return getPiRootRuntimeDir(root);
 }
 
 export function formatPiRootRelativePath(target: string, root: string | undefined = activePiRoot): string {

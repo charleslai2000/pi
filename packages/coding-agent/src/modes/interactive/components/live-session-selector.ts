@@ -69,14 +69,15 @@ export class LiveSessionSelector implements Component {
 			const slot = display.slot;
 			const marker = slot.id === this.options.foregroundSlotId ? "●" : " ";
 			const role = display.row?.role ?? "unassigned";
-			const title = slot.session.sessionName ?? slot.cwd.split(/[\\/]/).filter(Boolean).pop() ?? slot.id;
 			const status = slot.activity.busy ? "running/busy" : "idle";
-			const task = display.task ? ` · ${display.task.goalId}/${display.task.taskId}` : "";
+			const taskId = display.task?.taskId ?? display.row?.task_id;
+			const task = taskId ? ` · ${taskId}` : "";
+			const agent = display.row?.agent_slug ?? (role === "executor" ? "execution" : role);
 			const unread = slot.activity.unread ? "  unread" : "";
 			const indent = role === "executor" ? "  " : "";
 			const prefix = index === this.selectedIndex ? ">" : " ";
 			lines.push(
-				`${prefix} ${indent}${marker} ${role} · ${title} · ${slot.id} · ${status}${unread}${task}  ${slot.cwd}`.slice(
+				`${prefix} ${indent}${marker} ${agent} · ${slot.id} · ${status}${task}${unread}  ${slot.cwd}`.slice(
 					0,
 					width,
 				),

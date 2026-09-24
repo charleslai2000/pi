@@ -13,7 +13,6 @@ function project(): { base: string; root: string; sessions: string; design: stri
 	const design = join(root, "design");
 	const experiments = join(root, "experiments");
 	mkdirSync(join(root, ".pi"), { recursive: true });
-	mkdirSync(join(root, "control"), { recursive: true });
 	mkdirSync(design, { recursive: true });
 	mkdirSync(experiments, { recursive: true });
 	setPiRoot(root);
@@ -56,20 +55,21 @@ afterEach(() => setPiRoot(undefined));
 describe("SessionRegistry recovery integration", () => {
 	it("upgrades legacy control-role schema transactionally and reprojects authority roles", () => {
 		const value = project();
-		const control = durable(value.root, value.sessions, "legacy-controller");
+		const control = durable(value.root, join(value.root, ".pi", "sessions"), "legacy-controller");
 		const executor = durable(value.design, value.sessions, "legacy-executor");
 		const ordinary = durable(value.experiments, value.sessions, "legacy-ordinary");
-		mkdirSync(join(value.root, "control", "qualification", "tasks"), { recursive: true });
-		writeFileSync(join(value.root, "control", "qualification", "goal.md"), "# Qualification\n");
+		mkdirSync(join(value.root, ".pi", "qualification"), { recursive: true });
+		writeFileSync(join(value.root, ".pi", "qualification", "goal.md"), "# Qualification\n");
 		writeFileSync(
-			join(value.root, "control", "qualification", "tasks", "T001-fixture.md"),
+			join(value.root, ".pi", "qualification", "T001-fixture.md"),
 			"Status: ACTIVE\nWork area\nfixture\nObjective\nfixture\nCompletion\nfixture\nResult\nfixture\nRemaining\nfixture\n",
 		);
-		const dbPath = join(value.root, ".pi", "state", "control.sqlite3");
+		const dbPath = join(value.root, ".pi", "control.sqlite3");
 		const formalSessions = join(value.root, ".pi", "sessions");
 		mkdirSync(formalSessions, { recursive: true });
 		for (const manager of [control, executor, ordinary])
 			copyFileSync(manager.getSessionFile()!, join(formalSessions, `${manager.getSessionId()}.jsonl`));
+		copyFileSync(executor.getSessionFile()!, join(value.sessions, "executor.jsonl"));
 		mkdirSync(join(value.root, ".pi", "state"), { recursive: true });
 		const legacy = new DatabaseSync(dbPath);
 		legacy.exec(`CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -158,6 +158,7 @@ INSERT INTO meta VALUES('pi_root','${value.root}');`);
 			).updated_at,
 		).toBe(22);
 		migrated.close();
+		setPiRoot(value.root);
 		const rows = registry.rows();
 		const byId = new Map(rows.map((row) => [row.session_id, row]));
 		expect(rows).toHaveLength(3);
@@ -196,8 +197,8 @@ INSERT INTO meta VALUES('pi_root','${value.root}');`);
 		const executor = durable(value.design, value.sessions, "conflict");
 		mkdirSync(join(value.root, ".pi", "sessions"), { recursive: true });
 		copyFileSync(executor.getSessionFile()!, join(value.root, ".pi", "sessions", "conflict.jsonl"));
-		const dbPath = join(value.root, ".pi", "state", "control.sqlite3");
-		mkdirSync(join(value.root, ".pi", "state"), { recursive: true });
+		const dbPath = join(value.root, ".pi", "control.sqlite3");
+		mkdirSync(join(value.root, ".pi"), { recursive: true });
 		const legacy = new DatabaseSync(dbPath);
 		legacy.exec(`CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE runtime_instances (instance_id TEXT PRIMARY KEY, pid INTEGER NOT NULL, hostname TEXT NOT NULL, started_at INTEGER NOT NULL, heartbeat_at INTEGER NOT NULL, state TEXT NOT NULL CHECK(state IN ('active','closed')));
@@ -249,20 +250,30 @@ INSERT INTO meta VALUES('pi_root','${value.root}');`);
 			),
 		);
 		legacy.close();
-		mkdirSync(join(value.root, "control", "qualification", "tasks"), { recursive: true });
-		writeFileSync(join(value.root, "control", "qualification", "goal.md"), "# Qualification\n");
+		mkdirSync(join(value.root, ".pi", "qualification"), { recursive: true });
+		writeFileSync(join(value.root, ".pi", "qualification", "goal.md"), "# Qualification\n");
 		writeFileSync(
-			join(value.root, "control", "qualification", "tasks", "T001-fixture.md"),
+			join(value.root, ".pi", "qualification", "T001-fixture.md"),
 			"Status: ACTIVE\nWork area\nfixture\nObjective\nfixture\nCompletion\nfixture\nResult\nfixture\nRemaining\nfixture\n",
 		);
 		const before = new DatabaseSync(dbPath, { readOnly: true });
-		const beforeRows = before.prepare("SELECT * FROM sessions ORDER BY session_id").all();
+		const beforeRows = before
+			.prepare(
+				"SELECT session_id,session_file,cwd,name,role,runtime_state,runtime_instance_id,last_seen_at,updated_at FROM sessions ORDER BY session_id",
+			)
+			.all() as Array<Record<string, unknown>>;
 		before.close();
 		expect(() => new SessionRegistry(value.root, { acquire: false })).toThrow(
 			"both canonical Controller and assigned Executor",
 		);
 		const after = new DatabaseSync(dbPath, { readOnly: true });
-		expect(after.prepare("SELECT * FROM sessions ORDER BY session_id").all()).toEqual(beforeRows);
+		expect(
+			after
+				.prepare(
+					"SELECT session_id,session_file,cwd,name,role,runtime_state,runtime_instance_id,last_seen_at,updated_at FROM sessions ORDER BY session_id",
+				)
+				.all() as Array<Record<string, unknown>>,
+		).toEqual(beforeRows);
 		expect(
 			(
 				after.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='sessions'").get() as {
@@ -336,7 +347,7 @@ INSERT INTO meta VALUES('pi_root','${value.root}');`);
 			name: design.getSessionName(),
 		});
 		const oldId = first.runtimeInstance().instance_id;
-		const database = new DatabaseSync(join(value.root, ".pi", "state", "control.sqlite3"));
+		const database = new DatabaseSync(join(value.root, ".pi", "control.sqlite3"));
 		database.prepare("UPDATE runtime_instances SET heartbeat_at=0 WHERE instance_id=?").run(oldId);
 		database.close();
 		const second = new SessionRegistry(value.root, { heartbeatIntervalMs: 100, staleAfterMs: 1 });
@@ -367,7 +378,7 @@ INSERT INTO meta VALUES('pi_root','${value.root}');`);
 		first.rebuild(rows);
 		first.setCanonicalControlSessionId(control.getSessionId());
 		first.close();
-		const databaseDir = join(value.root, ".pi", "state");
+		const databaseDir = join(value.root, ".pi");
 		for (const suffix of ["", "-wal", "-shm"]) rmSync(join(databaseDir, `control.sqlite3${suffix}`), { force: true });
 		const rebuilt = new SessionRegistry(value.root);
 		rebuilt.rebuild(await SessionManager.listAll(value.sessions));

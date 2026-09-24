@@ -13,6 +13,7 @@ import { readExecutionAttempts } from "../src/core/control/execution-attempts.ts
 import { readTask } from "../src/core/control/read-model.ts";
 import { completeTask } from "../src/core/control/task-mutations.ts";
 import { setPiRoot } from "../src/core/pi-root.ts";
+import { SessionManager } from "../src/core/session-manager.ts";
 import { SessionRegistry, setSessionRegistryForTesting } from "../src/core/session-registry.ts";
 
 function fixture(status = "READY"): {
@@ -20,34 +21,31 @@ function fixture(status = "READY"): {
 	taskPath: string;
 	session: FakeSession;
 	runtime: AgentSessionRuntime;
+	sessionId: string;
 } {
 	const root = mkdtempSync(join("/tmp", "pi-native-task-lifecycle-"));
 	mkdirSync(join(root, ".pi"), { recursive: true });
-	const taskDir = join(root, "control", "goal-a", "tasks");
+	const taskDir = join(root, ".pi", "goal-a");
 	mkdirSync(taskDir, { recursive: true });
 	const taskPath = join(taskDir, "T001-work.md");
-	writeFileSync(join(root, "control", "goal-a", "goal.md"), "# Goal A\n");
+	writeFileSync(join(root, ".pi", "goal-a", "goal.md"), "# Goal A\n");
 	writeFileSync(taskPath, `Status: ${status}\nObjective: test native lifecycle\nResult: old\nRemaining: later\n`);
 	setPiRoot(root);
 	const registry = new SessionRegistry(root);
 	setSessionRegistryForTesting(registry);
-	const session = new FakeSession();
-	const sessionFile = join(root, ".pi", "sessions", "s1.jsonl");
-	mkdirSync(join(root, ".pi", "sessions"), { recursive: true });
-	writeFileSync(
-		sessionFile,
-		`${JSON.stringify({ type: "session", version: 3, id: "s1", timestamp: new Date().toISOString(), cwd: root })}\n`,
-	);
-	const controllerFile = join(root, ".pi", "sessions", "controller.jsonl");
-	writeFileSync(
-		controllerFile,
-		`${JSON.stringify({ type: "session", version: 3, id: "controller", timestamp: new Date().toISOString(), cwd: root })}\n`,
-	);
-	registry.upsert({ id: "controller", file: controllerFile, cwd: root, name: "Controller" });
-	registry.setCanonicalControlSessionId("controller");
-	registry.upsert({ id: "s1", file: sessionFile, cwd: root, name: "S1" });
+	const sessionManager = SessionManager.create(root);
+	const sessionFile = sessionManager.getSessionFile();
+	if (!sessionFile) throw new Error("Fixture Session was not persisted");
+	const sessionId = sessionManager.getSessionId();
+	const session = new FakeSession(sessionId);
+	const controllerManager = SessionManager.create(root);
+	const controllerFile = controllerManager.getSessionFile();
+	if (!controllerFile) throw new Error("Fixture Controller Session was not persisted");
+	registry.upsert({ id: controllerManager.getSessionId(), file: controllerFile, cwd: root, name: "Controller" });
+	registry.setCanonicalControlSessionId(controllerManager.getSessionId());
+	registry.upsert({ id: sessionId, file: sessionFile, cwd: root, name: "S1" });
 	const pool = {
-		findBySessionId: (id: string) => (id === "s1" ? { session } : undefined),
+		findBySessionId: (id: string) => (id === sessionId ? { session } : undefined),
 		getForeground: () => ({ session }),
 	};
 	const runtime = Object.assign(Object.create(AgentSessionRuntime.prototype) as AgentSessionRuntime, {
@@ -58,15 +56,20 @@ function fixture(status = "READY"): {
 		suppressExecutorSettlement: new Set<string>(),
 		_sessionPool: {
 			...pool,
-			findBySessionId: (id: string) => (id === "s1" ? { session } : undefined),
+			findBySessionId: (id: string) => (id === sessionId ? { session } : undefined),
 		},
 		notifyController: vi.fn(async () => {}),
 	});
-	return { root, taskPath, session, runtime };
+	return { root, taskPath, session, runtime, sessionId };
 }
 
 class FakeSession {
-	readonly sessionManager = { getSessionId: () => "s1", getSessionName: () => "S1" };
+	readonly sessionManager: { getSessionId: () => string; getSessionName: () => string };
+	private readonly id: string;
+	constructor(id: string) {
+		this.id = id;
+		this.sessionManager = { getSessionId: () => this.id, getSessionName: () => "S1" };
+	}
 	private listeners = new Set<(event: { type: string }) => void>();
 	private tools = new Map<string, { execute: (id: string, params: unknown) => Promise<unknown> }>();
 	activeTools: string[] = [];
@@ -131,7 +134,7 @@ afterEach(() => {
 describe("native Task Session lifecycle", () => {
 	it("publishes mandatory completion protocol for Task results", async () => {
 		const value = fixture();
-		await assignTaskToSession(value.root, "goal-a", "T001", "s1");
+		await assignTaskToSession(value.root, "goal-a", "T001", value.sessionId);
 		await value.runtime.startAssignedTask("goal-a", "T001");
 		expect(value.session.taskProtocol).toContain("pi-executor-stop");
 		expect(value.session.taskProtocol).toContain("task_memory is optional durable memory");
@@ -140,7 +143,7 @@ describe("native Task Session lifecycle", () => {
 
 	it("enforces admission, accepts, settles, resumes, and leaves no attempt history", async () => {
 		const value = fixture();
-		await assignTaskToSession(value.root, "goal-a", "T001", "s1");
+		await assignTaskToSession(value.root, "goal-a", "T001", value.sessionId);
 		await value.runtime.startAssignedTask("goal-a", "T001");
 		expect(value.session.activeTools).toEqual(["task_gate"]);
 		await expect(value.session.getTool("task_memory")?.execute("1", { memory: "no" })).rejects.toThrow("gate");
@@ -159,7 +162,7 @@ describe("native Task Session lifecycle", () => {
 
 	it("drops an old settle after a new user run starts, without changing Task or notifying Controller", async () => {
 		const value = fixture();
-		await assignTaskToSession(value.root, "goal-a", "T001", "s1");
+		await assignTaskToSession(value.root, "goal-a", "T001", value.sessionId);
 		await value.runtime.startAssignedTask("goal-a", "T001");
 		await value.session.getTool("task_gate")!.execute("1", { decision: "accept" });
 		value.session.messages.push({
@@ -179,7 +182,7 @@ describe("native Task Session lifecycle", () => {
 		value.session.emit("agent_settled");
 		value.session.emit("agent_start");
 		const release = unassignTask(value.root, "goal-a", "T001");
-		const redispatch = release.then(() => assignTaskToSession(value.root, "goal-a", "T001", "s1"));
+		const redispatch = release.then(() => assignTaskToSession(value.root, "goal-a", "T001", value.sessionId));
 		releaseMutation();
 		await hold;
 		await redispatch;
@@ -194,7 +197,7 @@ describe("native Task Session lifecycle", () => {
 
 	it("does not let a late terminated envelope overwrite terminal Task state", async () => {
 		const value = fixture();
-		await assignTaskToSession(value.root, "goal-a", "T001", "s1");
+		await assignTaskToSession(value.root, "goal-a", "T001", value.sessionId);
 		await value.runtime.startAssignedTask("goal-a", "T001");
 		await value.session.getTool("task_gate")!.execute("1", { decision: "accept" });
 		await completeTask(value.root, "goal-a", "T001", { result: "already complete" });
@@ -217,7 +220,7 @@ describe("native Task Session lifecycle", () => {
 
 	it("keeps continue_possible active for the same Session until a later completion", async () => {
 		const value = fixture();
-		await assignTaskToSession(value.root, "goal-a", "T001", "s1");
+		await assignTaskToSession(value.root, "goal-a", "T001", value.sessionId);
 		await value.runtime.startAssignedTask("goal-a", "T001");
 		await value.session.getTool("task_gate")!.execute("1", { decision: "accept" });
 		await value.session.prompt('<pi-executor-stop>{"reason":"continue_possible"}</pi-executor-stop>');
@@ -238,7 +241,7 @@ describe("native Task Session lifecycle", () => {
 
 	it("rebinds an admitted BLOCKED Task without reinstalling the gate", async () => {
 		const value = fixture("BLOCKED");
-		await assignTaskToSession(value.root, "goal-a", "T001", "s1");
+		await assignTaskToSession(value.root, "goal-a", "T001", value.sessionId);
 		const rebind = (value.runtime as unknown as { rebindAssignedTask: (session: FakeSession) => Promise<void> })
 			.rebindAssignedTask;
 		await rebind.call(value.runtime, value.session);
@@ -249,7 +252,7 @@ describe("native Task Session lifecycle", () => {
 
 	it("restores admitted lifecycle tools after host rebind resets active tools", async () => {
 		const value = fixture("BLOCKED");
-		await assignTaskToSession(value.root, "goal-a", "T001", "s1");
+		await assignTaskToSession(value.root, "goal-a", "T001", value.sessionId);
 		(
 			value.runtime as unknown as { setRebindSession: (callback: (session: FakeSession) => Promise<void>) => void }
 		).setRebindSession(async (session) => session.setActiveToolsByName(["task_memory"]));
@@ -260,7 +263,7 @@ describe("native Task Session lifecycle", () => {
 
 	it("preserves admitted Task tools when the host refreshes its ordinary tool set", async () => {
 		const value = fixture("BLOCKED");
-		await assignTaskToSession(value.root, "goal-a", "T001", "s1");
+		await assignTaskToSession(value.root, "goal-a", "T001", value.sessionId);
 		await (
 			value.runtime as unknown as { rebindAssignedTask: (session: FakeSession) => Promise<void> }
 		).rebindAssignedTask(value.session);
@@ -271,7 +274,7 @@ describe("native Task Session lifecycle", () => {
 
 	it("rejects and releases assignment without activating the Task", async () => {
 		const value = fixture();
-		await assignTaskToSession(value.root, "goal-a", "T001", "s1");
+		await assignTaskToSession(value.root, "goal-a", "T001", value.sessionId);
 		await value.runtime.startAssignedTask("goal-a", "T001");
 		await value.session.getTool("task_gate")!.execute("1", { decision: "reject", reason: "missing input" });
 		expect(readAssociations(value.root).current).toEqual([]);
@@ -281,7 +284,7 @@ describe("native Task Session lifecycle", () => {
 
 	it("writes memory only to the bound Task and completes or terminates through Task lifecycle", async () => {
 		const value = fixture();
-		await assignTaskToSession(value.root, "goal-a", "T001", "s1");
+		await assignTaskToSession(value.root, "goal-a", "T001", value.sessionId);
 		await value.runtime.startAssignedTask("goal-a", "T001");
 		await value.session.getTool("task_gate")!.execute("1", { decision: "accept" });
 		await value.session.getTool("task_memory")!.execute("1", { memory: "Decision: keep Session-native execution." });

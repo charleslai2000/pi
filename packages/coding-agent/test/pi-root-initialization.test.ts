@@ -23,7 +23,7 @@ describe("PiRoot CLI resolution and initialization", () => {
 	it("explicit root initializes missing .pi and is idempotent", async () => {
 		const root = project();
 		expect(await resolveCliPiRoot({ explicitRoot: root, cwd: "/unused", interactive: false })).toBe(root);
-		for (const path of [join(root, ".pi"), join(root, ".pi", "state"), join(root, ".pi", "sessions")])
+		for (const path of [join(root, ".pi"), join(root, ".pi", "sessions")])
 			expect(statSync(path).isDirectory()).toBe(true);
 
 		expect(() => statSync(join(root, "control"))).toThrow();

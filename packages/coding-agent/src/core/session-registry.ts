@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { hostname } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -13,6 +13,9 @@ export type SessionRegistryRuntimeState = "active" | "inactive";
 export interface RegistryRow {
 	session_id: string;
 	session_file: string | null;
+	agent_slug: string | null;
+	task_id: string | null;
+	assignment_generation: number | null;
 	cwd: string;
 	name: string | null;
 	role: SessionRegistryRole;
@@ -50,12 +53,34 @@ function now(): number {
 	return Date.now();
 }
 function registryPath(runtimeDir: string): string {
-	return join(runtimeDir, "state", "control.sqlite3");
+	return join(runtimeDir, "control.sqlite3");
 }
 function ensurePiRuntime(runtimeDir: string): void {
-	mkdirSync(join(runtimeDir, "state"), { recursive: true });
-	const file = join(runtimeDir, ".gitignore");
-	if (!existsSync(file)) writeFileSync(file, "state/\nsessions/\n");
+	mkdirSync(runtimeDir, { recursive: true });
+	const oldPath = join(runtimeDir, "state", "control.sqlite3");
+	const newPath = registryPath(runtimeDir);
+	if (!existsSync(newPath) && existsSync(oldPath)) {
+		if (existsSync(`${oldPath}-wal`) || existsSync(`${oldPath}-shm`))
+			throw new Error(`Legacy SessionRegistry has live SQLite sidecars under ${runtimeDir}`);
+		renameSync(oldPath, newPath);
+	}
+	const ignorePath = join(runtimeDir, ".gitignore");
+	const required = "control.sqlite3\ncontrol.sqlite3-*\n";
+	if (!existsSync(ignorePath)) {
+		writeFileSync(ignorePath, required);
+		return;
+	}
+	const existing = readFileSync(ignorePath, "utf8");
+	const missing = required.split("\n").filter((line) => line && !existing.split(/\r?\n/).includes(line));
+	if (missing.length) writeFileSync(ignorePath, `${existing.trimEnd()}\n${missing.join("\n")}\n`);
+	const stateIgnore = join(runtimeDir, "state", ".gitignore");
+	if (existsSync(stateIgnore)) {
+		const stateRules = readFileSync(stateIgnore, "utf8").split(/\r?\n/);
+		const retained = stateRules.filter(
+			(rule) => rule !== "control.sqlite3" && rule !== "control.sqlite3-wal" && rule !== "control.sqlite3-shm",
+		);
+		if (retained.length !== stateRules.length) writeFileSync(stateIgnore, retained.join("\n").replace(/\n*$/, "\n"));
+	}
 }
 
 export class SessionRegistry {
@@ -85,7 +110,7 @@ CREATE TABLE IF NOT EXISTS runtime_instances (
  state TEXT NOT NULL CHECK(state IN ('active','closed'))
 );
 CREATE TABLE IF NOT EXISTS sessions (
- session_id TEXT PRIMARY KEY, session_file TEXT UNIQUE, cwd TEXT NOT NULL, name TEXT,
+ session_id TEXT PRIMARY KEY, session_file TEXT UNIQUE, agent_slug TEXT, task_id TEXT, assignment_generation INTEGER, cwd TEXT NOT NULL, name TEXT,
  role TEXT NOT NULL CHECK(role IN ('controller','executor','unassigned')),
  runtime_state TEXT NOT NULL CHECK(runtime_state IN ('active','inactive')),
  runtime_instance_id TEXT REFERENCES runtime_instances(instance_id),
@@ -110,10 +135,20 @@ CREATE TABLE IF NOT EXISTS sessions (
 
 	private migrateSessions(): void {
 		const columns = this.db.prepare("PRAGMA table_info(sessions)").all() as Array<{ name: string }>;
+		if (columns.length === 0) return;
 		if (!columns.some((column) => column.name === "runtime_instance_id")) {
 			this.db.exec(
 				"ALTER TABLE sessions ADD COLUMN runtime_instance_id TEXT REFERENCES runtime_instances(instance_id)",
 			);
+		}
+		const refreshed = this.db.prepare("PRAGMA table_info(sessions)").all() as Array<{ name: string }>;
+		for (const [name, type] of [
+			["agent_slug", "TEXT"],
+			["task_id", "TEXT"],
+			["assignment_generation", "INTEGER"],
+		] as const) {
+			if (!refreshed.some((column) => column.name === name))
+				this.db.exec(`ALTER TABLE sessions ADD COLUMN ${name} ${type}`);
 		}
 		this.db.exec(
 			"CREATE INDEX IF NOT EXISTS sessions_active_instance ON sessions(runtime_state, runtime_instance_id)",
@@ -131,20 +166,29 @@ CREATE TABLE IF NOT EXISTS sessions (
 		this.db.exec("BEGIN IMMEDIATE");
 		try {
 			const canonicalId = this.canonicalControlSessionId();
-			const assignments = readAssociations(this.root).current;
+			const rawAssociations = JSON.parse(
+				readFileSync(join(getPiRootRuntimeDir(this.root)!, "assignments.json"), "utf8"),
+			) as {
+				current?: Array<{ sessionId: string }>;
+			};
+			const sessionRows = this.db.prepare("SELECT session_id FROM sessions").all() as Array<{ session_id: string }>;
+			const sessionIds = new Set(sessionRows.map((row) => row.session_id));
+			const assignments = (rawAssociations.current ?? []).filter((assignment) =>
+				sessionIds.has(assignment.sessionId),
+			);
 			const assignmentIds = new Set(assignments.map((assignment) => assignment.sessionId));
 			if (canonicalId && assignmentIds.has(canonicalId))
 				throw new Error(`Session ${canonicalId} is both canonical Controller and assigned Executor`);
 			this.db.exec(`
 CREATE TABLE sessions_formal (
- session_id TEXT PRIMARY KEY, session_file TEXT UNIQUE, cwd TEXT NOT NULL, name TEXT,
+ session_id TEXT PRIMARY KEY, session_file TEXT UNIQUE, agent_slug TEXT, task_id TEXT, assignment_generation INTEGER, cwd TEXT NOT NULL, name TEXT,
  role TEXT NOT NULL CHECK(role IN ('controller','executor','unassigned')),
  runtime_state TEXT NOT NULL CHECK(runtime_state IN ('active','inactive')),
  runtime_instance_id TEXT REFERENCES runtime_instances(instance_id),
  last_seen_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
 );
-INSERT INTO sessions_formal(session_id,session_file,cwd,name,role,runtime_state,runtime_instance_id,last_seen_at,updated_at)
-SELECT session_id,session_file,cwd,name,'unassigned',runtime_state,runtime_instance_id,last_seen_at,updated_at FROM sessions;
+INSERT INTO sessions_formal(session_id,session_file,agent_slug,task_id,assignment_generation,cwd,name,role,runtime_state,runtime_instance_id,last_seen_at,updated_at)
+SELECT session_id,session_file,NULL,NULL,NULL,cwd,name,'unassigned',runtime_state,runtime_instance_id,last_seen_at,updated_at FROM sessions;
 DROP TABLE sessions;
 ALTER TABLE sessions_formal RENAME TO sessions;
 CREATE INDEX sessions_active_instance ON sessions(runtime_state, runtime_instance_id);
@@ -232,18 +276,15 @@ CREATE INDEX sessions_active_instance ON sessions(runtime_state, runtime_instanc
 	rebuild(rows: readonly SessionInfo[]): void {
 		const timestamp = now();
 		const upsert =
-			this.db.prepare(`INSERT INTO sessions(session_id,session_file,cwd,name,role,runtime_state,runtime_instance_id,last_seen_at,updated_at)
-VALUES(?,?,?,?,?,'inactive',NULL,?,?) ON CONFLICT(session_id) DO UPDATE SET session_file=excluded.session_file,cwd=excluded.cwd,name=excluded.name,role=excluded.role,runtime_state='inactive',runtime_instance_id=NULL,last_seen_at=excluded.last_seen_at,updated_at=excluded.updated_at`);
+			this.db.prepare(`INSERT INTO sessions(session_id,session_file,agent_slug,task_id,assignment_generation,cwd,name,role,runtime_state,runtime_instance_id,last_seen_at,updated_at)
+VALUES(?,?,NULL,NULL,NULL,?,?,?,'inactive',NULL,?,?) ON CONFLICT(session_id) DO UPDATE SET session_file=excluded.session_file,cwd=excluded.cwd,name=excluded.name,role=excluded.role,runtime_state='inactive',runtime_instance_id=NULL,last_seen_at=excluded.last_seen_at,updated_at=excluded.updated_at`);
 		this.db.exec("BEGIN IMMEDIATE");
 		try {
 			const recoveredRows = new Map(rows.map((row) => [row.id, row]));
-			const runtimeDir = getPiRootRuntimeDir(this.root);
-			if (!runtimeDir) throw new Error(`PiRoot has no runtime directory: ${this.root}`);
-			const sessionDir = join(runtimeDir, "sessions");
 			for (const assignment of readAssociations(this.root).current) {
 				if (assignment.sessionId === this.canonicalControlSessionId()) continue;
 				if (recoveredRows.has(assignment.sessionId)) continue;
-				const sessionFile = SessionManager.findById(this.root, assignment.sessionId, sessionDir);
+				const sessionFile = SessionManager.findById(this.root, assignment.sessionId);
 				if (!sessionFile) throw new Error(`Assigned durable Session cannot be recovered: ${assignment.sessionId}`);
 				const manager = SessionManager.open(sessionFile);
 				if (manager.getSessionId() !== assignment.sessionId)
@@ -262,7 +303,7 @@ VALUES(?,?,?,?,?,'inactive',NULL,?,?) ON CONFLICT(session_id) DO UPDATE SET sess
 			}
 			for (const row of [...recoveredRows.values()].sort((left, right) => left.id.localeCompare(right.id))) {
 				const cwd = canonicalizePath(row.cwd);
-				const sessionFile = SessionManager.findById(this.root, row.id, sessionDir) ?? row.path;
+				const sessionFile = SessionManager.findById(this.root, row.id) ?? row.path;
 				upsert.run(
 					row.id,
 					canonicalizePath(sessionFile),
@@ -307,7 +348,7 @@ VALUES(?,?,?,?,?,'inactive',NULL,?,?) ON CONFLICT(session_id) DO UPDATE SET sess
 		return id === undefined ? undefined : this.rows().find((row) => row.session_id === id);
 	}
 
-	async openCanonicalController(sessionDir?: string, cwd = this.root): Promise<SessionManager> {
+	async openCanonicalController(sessionDir?: string, cwd = join(this.root, ".pi")): Promise<SessionManager> {
 		const existing = this.canonicalControlSession();
 		if (existing && existsSync(existing.session_file ?? ""))
 			return SessionManager.open(existing.session_file!, sessionDir);
@@ -350,27 +391,44 @@ VALUES(?,?,?,?,?,'inactive',NULL,?,?) ON CONFLICT(session_id) DO UPDATE SET sess
 		this.db.prepare("INSERT OR REPLACE INTO meta(key,value) VALUES('canonical_control_session_id',?)").run(id);
 	}
 
-	upsert(session: { id: string; file?: string; cwd: string; name?: string }): void {
+	upsert(session: {
+		id: string;
+		file?: string;
+		cwd: string;
+		name?: string;
+		agentSlug?: string;
+		taskId?: string;
+		assignmentGeneration?: number;
+	}): void {
 		const timestamp = now();
 		const cwd = canonicalizePath(session.cwd);
-		this.db
-			.prepare(`INSERT INTO sessions(session_id,session_file,cwd,name,role,runtime_state,runtime_instance_id,last_seen_at,updated_at)
-VALUES(?,?,?,?,?,'active',?,?,?) ON CONFLICT(session_id) DO UPDATE SET session_file=excluded.session_file,cwd=excluded.cwd,name=excluded.name,role=excluded.role,runtime_state='active',runtime_instance_id=excluded.runtime_instance_id,last_seen_at=excluded.last_seen_at,updated_at=excluded.updated_at`)
-			.run(
-				session.id,
-				session.file ? canonicalizePath(session.file) : null,
-				cwd,
-				session.name ?? null,
-				this.roleFor(session.id, cwd),
-				this.instance.instance_id,
-				timestamp,
-				timestamp,
-			);
+		const insert =
+			this.db.prepare(`INSERT INTO sessions(session_id,session_file,agent_slug,task_id,assignment_generation,cwd,name,role,runtime_state,runtime_instance_id,last_seen_at,updated_at)
+VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(session_id) DO UPDATE SET session_file=excluded.session_file,agent_slug=excluded.agent_slug,task_id=excluded.task_id,assignment_generation=excluded.assignment_generation,cwd=excluded.cwd,name=excluded.name,role=excluded.role,runtime_state=excluded.runtime_state,runtime_instance_id=excluded.runtime_instance_id,last_seen_at=excluded.last_seen_at,updated_at=excluded.updated_at`);
+		insert.run(
+			session.id,
+			session.file ? canonicalizePath(session.file) : null,
+			session.agentSlug ?? null,
+			session.taskId ?? null,
+			session.assignmentGeneration ?? null,
+			cwd,
+			session.name ?? null,
+			this.roleFor(session.id, cwd),
+			"active",
+			this.instance.instance_id,
+			timestamp,
+			timestamp,
+		);
 		if (this.roleFor(session.id, cwd) === "unassigned" && !this.canonicalControlSessionId())
 			this.setCanonicalControlSessionId(session.id);
 	}
 	setName(id: string, name: string | undefined): void {
 		this.db.prepare("UPDATE sessions SET name=?,updated_at=? WHERE session_id=?").run(name ?? null, now(), id);
+	}
+	setAgentProfile(id: string, agentSlug: string | undefined): void {
+		this.db
+			.prepare("UPDATE sessions SET agent_slug=?,name=COALESCE(?,name),updated_at=? WHERE session_id=?")
+			.run(agentSlug ?? null, agentSlug ?? null, now(), id);
 	}
 
 	refreshRoles(): void {
@@ -414,13 +472,12 @@ VALUES(?,?,?,?,?,'active',?,?,?) ON CONFLICT(session_id) DO UPDATE SET session_f
 	}
 	inactiveRows(): RegistryRow[] {
 		const canonical = this.canonicalControlSessionId();
-		const runtimeDir = getPiRootRuntimeDir(this.root);
 		return this.rows().filter(
 			(row) =>
 				row.runtime_state === "inactive" &&
 				row.role !== "controller" &&
 				row.session_id !== canonical &&
-				row.cwd !== runtimeDir,
+				row.cwd !== getPiRootRuntimeDir(this.root),
 		);
 	}
 	rows(): RegistryRow[] {
@@ -430,13 +487,12 @@ VALUES(?,?,?,?,?,'active',?,?,?) ON CONFLICT(session_id) DO UPDATE SET session_f
 			.all() as unknown as RegistryRow[];
 	}
 	private roleFor(sessionId: string, _cwd: string): SessionRegistryRole {
+		const assignments = readAssociations(this.root);
 		if (sessionId === this.canonicalControlSessionId()) {
-			const assignments = readAssociations(this.root);
 			if (assignments.current.some((assignment) => assignment.sessionId === sessionId))
 				throw new Error(`Session ${sessionId} is both canonical Controller and assigned Executor`);
 			return "controller";
 		}
-		const assignments = readAssociations(this.root);
 		return assignments.current.some((assignment) => assignment.sessionId === sessionId) ? "executor" : "unassigned";
 	}
 	close(): void {
@@ -468,9 +524,7 @@ export async function initializeSessionRegistry(
 		return registry;
 	}
 	registry = new SessionRegistry(canonicalRoot, options);
-	const runtimeDir = getPiRootRuntimeDir(canonicalRoot);
-	const sessionDir = options.sessionDir ?? (runtimeDir ? join(runtimeDir, "sessions") : undefined);
-	const rows = await SessionManager.listAll(sessionDir);
+	const rows = await SessionManager.listAll(options.sessionDir);
 	registry.rebuild(rows);
 	return registry;
 }
@@ -482,11 +536,22 @@ export function setSessionRegistryForTesting(value: SessionRegistry | undefined)
 	registry = value;
 }
 
-export function syncSessionRegistry(session: { id: string; file?: string; cwd: string; name?: string }): void {
+export function syncSessionRegistry(session: {
+	id: string;
+	file?: string;
+	cwd: string;
+	name?: string;
+	agentSlug?: string;
+	taskId?: string;
+	assignmentGeneration?: number;
+}): void {
 	registry?.upsert(session);
 }
 export function syncSessionRegistryName(id: string, name: string | undefined): void {
 	registry?.setName(id, name);
+}
+export function syncSessionAgentProfile(id: string, agentSlug: string | undefined): void {
+	registry?.setAgentProfile(id, agentSlug);
 }
 export function deactivateSessionRegistry(id: string): void {
 	registry?.setInactive(id);
