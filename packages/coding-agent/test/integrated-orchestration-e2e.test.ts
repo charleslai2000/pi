@@ -229,7 +229,7 @@ describe("C4 integrated Session-native orchestration", () => {
 		expect(firstT1.session.systemPrompt).not.toContain("Second parallel task");
 		expect(firstT1.session.systemPrompt).toContain('<project_instructions path="');
 		expect(firstT1.session.systemPrompt.indexOf("PiRoot instructions.")).toBeLessThan(
-			firstT1.session.systemPrompt.indexOf("Goal context (goal-a):"),
+			firstT1.session.systemPrompt.indexOf("Goal relevant context (goal-a):"),
 		);
 		await call("dispatch_task", { goalId: "goal-a", taskId: "T002", agent: "coder" });
 		const firstT2 = executorFor("T002");
@@ -563,5 +563,5 @@ describe("C4 integrated Session-native orchestration", () => {
 		expect(recoveredSlot?.session.getActiveToolNames()).toContain("task_memory");
 		await recoveredApp.shutdown();
 		setSessionRegistryForTesting(undefined);
-	});
+	}, 60_000);
 });

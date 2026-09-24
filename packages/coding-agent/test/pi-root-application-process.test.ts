@@ -1,5 +1,5 @@
 import { type ChildProcess, spawn } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
 import { DatabaseSync } from "node:sqlite";
@@ -24,8 +24,9 @@ const exitedChildren = new WeakSet<ChildProcess>();
 function makeProject(): { base: string; root: string; agentDir: string } {
 	const base = mkdtempSync(join("/tmp", "pi-root-process-"));
 	const root = join(base, "project");
-	mkdirSync(join(root, ".pi"), { recursive: true });
+	mkdirSync(join(root, ".pi", "agents"), { recursive: true });
 	mkdirSync(join(root, "design"), { recursive: true });
+	writeFileSync(join(root, ".pi", "agents", "orchestrator.md"), "Canonical Controller.\n");
 	return { base, root, agentDir: join(base, "agent") };
 }
 

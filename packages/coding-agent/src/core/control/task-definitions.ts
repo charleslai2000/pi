@@ -1,4 +1,14 @@
-import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import {
+	closeSync,
+	existsSync,
+	fsyncSync,
+	mkdirSync,
+	openSync,
+	readFileSync,
+	renameSync,
+	unlinkSync,
+	writeFileSync,
+} from "node:fs";
 import { join } from "node:path";
 import { listTasks, readGoal, readTask, resolveControlDirectory, type TaskRecord } from "./read-model.ts";
 import { withTaskMutationLock } from "./task-lock.ts";
@@ -7,11 +17,13 @@ import { isTerminalTaskStatus, parseTaskStatus } from "./task-status.ts";
 export interface GoalDefinitionInput {
 	readonly title?: string;
 	readonly status?: string;
+	readonly memory?: string;
 }
 
 export interface GoalDefinitionPatch {
 	readonly title?: string;
 	readonly status?: string;
+	readonly memory?: string;
 }
 
 export interface TaskDefinitionInput {
@@ -30,9 +42,30 @@ export function createGoal(piRoot: string, goalId: string, definition: GoalDefin
 	mkdirSync(directory, { recursive: true });
 	writeFileSync(
 		join(directory, "goal.md"),
-		[`# ${definition.title ?? goalId}`, `Status: ${definition.status ?? "READY"}`, ""].join("\n"),
+		[
+			`# ${definition.title ?? goalId}`,
+			`Status: ${definition.status ?? "READY"}`,
+			`Memory: ${definition.memory ?? ""}`,
+			"",
+		].join("\n"),
 	);
 	return join(directory, "goal.md");
+}
+
+export function updateGoalMemory(piRoot: string, goalId: string, memory: string): string {
+	const goal = readGoal(piRoot, goalId);
+	const content = replaceManagedField(goal.content, "Memory", validateText(memory, "Goal memory", true)!);
+	atomicWrite(goal.goalFile, content);
+	return goal.goalFile;
+}
+
+export function updatePlanMemory(piRoot: string, goalId: string, memory: string): string {
+	const goal = readGoal(piRoot, goalId);
+	const planPath = goal.planFile ?? join(goal.directory, "plan.md");
+	const current = goal.planFile ? readFileSync(planPath, "utf8") : "# Plan\n";
+	const content = replaceManagedField(current, "Coordination memory", validateText(memory, "Plan memory", true)!);
+	atomicWrite(planPath, content);
+	return planPath;
 }
 
 export function reviseGoal(piRoot: string, goalId: string, patch: GoalDefinitionPatch): string {
@@ -40,8 +73,20 @@ export function reviseGoal(piRoot: string, goalId: string, patch: GoalDefinition
 	let content = goal.content;
 	if (patch.title !== undefined) content = content.replace(/^# .*$/m, `# ${patch.title}`);
 	if (patch.status !== undefined) content = content.replace(/^Status:.*$/m, `Status: ${patch.status}`);
+	if (patch.memory !== undefined)
+		content = replaceManagedField(content, "Memory", validateText(patch.memory, "Goal memory", true)!);
 	atomicWrite(goal.goalFile, content);
 	return goal.goalFile;
+}
+
+function replaceManagedField(content: string, name: "Memory" | "Coordination memory", value: string): string {
+	const escapedName = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+	const matches = [...content.matchAll(new RegExp(`^${escapedName}:`, "gm"))];
+	if (matches.length === 0) return `${content.trimEnd()}\n\n${name}: ${value}\n`;
+	if (matches.length > 1) throw new Error(`Document must contain at most one ${name}: field`);
+	const start = matches[0]!.index!;
+	const end = content.indexOf("\n", start);
+	return `${content.slice(0, start)}${name}: ${value}${end < 0 ? "\n" : content.slice(end)}`;
 }
 
 function field(content: string, name: string, value: string): string {

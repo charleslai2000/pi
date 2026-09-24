@@ -1,2 +1,15 @@
-control.sqlite3
-control.sqlite3-*
+# Machine-local PiRoot runtime state; authority documents remain trackable.
+/state/
+/git/
+/npm/
+/sessions/
+*.sqlite3
+*.sqlite3-*
+*.db
+*.db-*
+*.lock
+*.lock-*
+*.tmp
+*.tmp.*
+/cache/
+/cache-*/

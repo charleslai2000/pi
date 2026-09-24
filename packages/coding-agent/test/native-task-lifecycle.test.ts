@@ -147,6 +147,8 @@ describe("native Task Session lifecycle", () => {
 		await value.runtime.startAssignedTask("goal-a", "T001");
 		expect(value.session.activeTools).toEqual(["task_gate"]);
 		await expect(value.session.getTool("task_memory")?.execute("1", { memory: "no" })).rejects.toThrow("gate");
+		expect(value.session.activeTools).not.toContain("update_goal_memory");
+		expect(value.session.activeTools).not.toContain("update_plan_memory");
 		await value.session.getTool("task_gate")!.execute("1", { decision: "accept" });
 		expect(readTask(value.root, "goal-a", "T001").status).toBe("ACTIVE");
 		expect(value.session.activeTools).toEqual(["task_memory"]);

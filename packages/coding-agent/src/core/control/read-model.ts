@@ -9,6 +9,8 @@ export interface GoalRecord {
 	readonly planFile?: string;
 	readonly title?: string;
 	readonly status?: string;
+	readonly memory?: string;
+	readonly coordinationMemory?: string;
 	readonly content: string;
 }
 
@@ -118,6 +120,8 @@ function parseGoal(goalId: string, directory: string): GoalRecord {
 		planFile: existsSync(plan) && statSync(plan).isFile() ? assertControlPath(plan, dirname(directory)) : undefined,
 		title: title(content),
 		status: section(content, "Status"),
+		memory: section(content, "Memory"),
+		coordinationMemory: section(content, "Coordination memory"),
 		content,
 	};
 }

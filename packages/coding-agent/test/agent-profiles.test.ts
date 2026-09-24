@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { AgentProfileError, listAgentProfiles, resolveAgentProfile } from "../src/core/agent-profiles.ts";
 import { createAgentSessionFromServices, createAgentSessionServices } from "../src/core/agent-session-services.ts";
 import { AuthStorage } from "../src/core/auth-storage.ts";
-import { forkExecutionSession } from "../src/core/execution-session.ts";
+import { buildExecutionTaskContext, forkExecutionSession } from "../src/core/execution-session.ts";
 import { ModelRuntime } from "../src/core/model-runtime.ts";
 import { setPiRoot } from "../src/core/pi-root.ts";
 import { SessionManager } from "../src/core/session-manager.ts";
@@ -106,8 +106,8 @@ describe("Pi Agent profiles", () => {
 		);
 		const goal = join(root, ".pi", "T001");
 		mkdirSync(goal, { recursive: true });
-		writeFileSync(join(goal, "goal.md"), "# Goal T001\nGoal durable memory.\n");
-		writeFileSync(join(goal, "plan.md"), "Plan current strategy.\n");
+		writeFileSync(join(goal, "goal.md"), "# Goal T001\nStatus: READY\nMemory: Goal durable memory.\n");
+		writeFileSync(join(goal, "plan.md"), "Plan current strategy and coordination memory.\n");
 		writeFileSync(
 			join(goal, "T001-work.md"),
 			"Status: READY\nObjective: Do the task\nCompletion: done\nMemory: fresh memory\n",
@@ -162,12 +162,46 @@ describe("Pi Agent profiles", () => {
 		expect(prompt.indexOf("Profile body.")).toBeLessThan(prompt.indexOf("Execution working directory:"));
 		expect(prompt.indexOf("Execution working directory:")).toBeLessThan(prompt.indexOf("Root instructions."));
 		expect(prompt.indexOf("Root instructions.")).toBeLessThan(prompt.indexOf("Leaf instructions."));
-		expect(prompt.indexOf("Leaf instructions.")).toBeLessThan(prompt.indexOf("Goal durable memory."));
-		expect(prompt.indexOf("Goal durable memory.")).toBeLessThan(prompt.indexOf("Plan current strategy."));
-		expect(prompt.indexOf("Plan current strategy.")).toBeLessThan(prompt.indexOf("Current Task (T001)"));
+		expect(prompt.indexOf("Leaf instructions.")).toBeLessThan(prompt.indexOf("Memory: Goal durable memory."));
+		expect(prompt.indexOf("Memory: Goal durable memory.")).toBeLessThan(
+			prompt.indexOf("Plan current strategy and coordination memory."),
+		);
+		expect(prompt.indexOf("Plan current strategy and coordination memory.")).toBeLessThan(
+			prompt.indexOf("Current Task (T001)"),
+		);
 		expect(prompt).toContain("fresh memory");
 		await result.session.dispose();
 		faux.unregister();
+	});
+
+	it("assembles only Goal, Plan, declared prerequisite, and current Task context", () => {
+		const root = workspace();
+		const goalDir = join(root, ".pi", "goal-a");
+		mkdirSync(goalDir, { recursive: true });
+		writeFileSync(join(goalDir, "goal.md"), "# Goal A\nStatus: READY\nMemory: Goal memory: keep shared invariant.\n");
+		writeFileSync(
+			join(goalDir, "plan.md"),
+			"# Plan\nCoordination memory: Coordination memory: T001 precedes T002.\n",
+		);
+		writeFileSync(join(goalDir, "T001-build.md"), "Status: DONE\nObjective: Build\nMemory: parser evidence\n");
+		writeFileSync(
+			join(goalDir, "T002-review.md"),
+			"Status: READY\nObjective: Review\nPrerequisites: goal-a/T001\nMemory: review memory\n",
+		);
+		writeFileSync(join(goalDir, "T003-unrelated.md"), "Status: READY\nObjective: unrelated sibling\n");
+		const context = buildExecutionTaskContext(root, "goal-a", "T002");
+		expect(context.indexOf("Goal relevant context")).toBeLessThan(context.indexOf("Plan current strategy"));
+		expect(context.indexOf("Plan current strategy")).toBeLessThan(
+			context.indexOf("Relevant prerequisite Task context"),
+		);
+		expect(context.indexOf("Relevant prerequisite Task context")).toBeLessThan(
+			context.indexOf("Current Task (T002)"),
+		);
+		expect(context).toContain("Goal memory: keep shared invariant");
+		expect(context).toContain("Coordination memory: T001 precedes T002");
+		expect(context).toContain("Memory: parser evidence");
+		expect(context).toContain("Memory: review memory");
+		expect(context).not.toContain("unrelated sibling");
 	});
 
 	it("forks an ordinary Pi Session preserving source history and assigns target cwd", () => {

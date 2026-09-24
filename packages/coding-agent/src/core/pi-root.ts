@@ -274,16 +274,10 @@ export function assertManagedControlMutationAllowed(target: string): void {
 	const root = activePiRoot;
 	if (!root) return;
 	const runtime = getPiRootRuntimeDir(root);
-	const control = runtime;
-	if (!control || !runtime) return;
+	if (!runtime) return;
 	const candidate = canonicalizeAllowMissing(target);
-	const inControl =
-		isPathInsidePiRoot(candidate, control) &&
-		(relative(control, candidate) === "" || !relative(control, candidate).startsWith(`..${sep}`));
-	const inRuntime =
-		isPathInsidePiRoot(candidate, runtime) &&
-		(relative(runtime, candidate) === "" || !relative(runtime, candidate).startsWith(`..${sep}`));
-	if (inControl || inRuntime)
+	const inControlRoot = isPathInsidePiRoot(candidate, runtime);
+	if (inControlRoot)
 		throw new PiRootPathError(`Managed Control Plane files must be changed through control tools: ${target}`, target);
 }
 

@@ -18,7 +18,14 @@ import {
 	withAssociationMutationLock,
 } from "./control/associations.ts";
 import { listGoals, listTasks, readGoal, readTask } from "./control/read-model.ts";
-import { createGoal, createTask, reviseGoal, reviseTask } from "./control/task-definitions.ts";
+import {
+	createGoal,
+	createTask,
+	reviseGoal,
+	reviseTask,
+	updateGoalMemory,
+	updatePlanMemory,
+} from "./control/task-definitions.ts";
 import {
 	dependencySatisfied,
 	listDerivedFrontier,
@@ -139,6 +146,7 @@ const CONTROLLER_SESSION_PROTOCOL = [
 	"A BLOCKED Task may be waiting for a user or external condition. Do not mechanically send continue notices, and do not repeatedly prompt a non-terminal Task without a concrete reason.",
 	"If there is no clear next action, naturally settle this Controller Session. Do not implement a scheduler, polling loop, hardcoded dispatch loop, or hidden orchestration state.",
 	"Controller close_task is an explicit lifecycle mutation and does not require a self-notification; Executor-originated reject, BLOCKED, DONE, and DEFERRED notices remain factual inputs.",
+	"Use update_goal_memory only for durable cross-Task Goal context; use update_plan_memory for current coordination strategy. These managed mutations are Controller-only. Executors may update only their assigned Task using task_memory.",
 ].join("\n");
 
 export interface ExecutorContextSnapshot {
@@ -454,34 +462,78 @@ export class AgentSessionRuntime {
 		this.controllerTool(
 			_session,
 			"create_goal",
-			"Create a Goal authority directory with goal.md without raw file mutation.",
+			"Create a Goal authority directory under .pi/<goal-id>/ with goal.md, plan.md, and optional cross-Task Memory.",
 			{
 				type: "object",
-				properties: { goalId: { type: "string" }, title: { type: "string" }, status: { type: "string" } },
+				properties: {
+					goalId: { type: "string" },
+					title: { type: "string" },
+					status: { type: "string" },
+					memory: { type: "string" },
+				},
 				required: ["goalId"],
 				additionalProperties: false,
 			} as AgentTool["parameters"],
 			async (_id, raw) => {
 				const p = raw as Record<string, unknown>;
 				return text(
-					`Created Goal ${String(p.goalId)} at ${createGoal(this.associationRoot(), String(p.goalId), { title: p.title as string | undefined, status: p.status as string | undefined })}`,
+					`Created Goal ${String(p.goalId)} at ${createGoal(this.associationRoot(), String(p.goalId), { title: p.title as string | undefined, status: p.status as string | undefined, memory: p.memory as string | undefined })}`,
 				);
 			},
 		);
 		this.controllerTool(
 			_session,
 			"revise_goal",
-			"Revise managed Goal fields without raw file mutation.",
+			"Revise managed Goal fields and optionally update Goal durable memory.",
 			{
 				type: "object",
-				properties: { goalId: { type: "string" }, title: { type: "string" }, status: { type: "string" } },
+				properties: {
+					goalId: { type: "string" },
+					title: { type: "string" },
+					status: { type: "string" },
+					memory: { type: "string" },
+				},
 				required: ["goalId"],
 				additionalProperties: false,
 			} as AgentTool["parameters"],
 			async (_id, raw) => {
 				const p = raw as Record<string, unknown>;
 				return text(
-					`Revised Goal ${String(p.goalId)} at ${reviseGoal(this.associationRoot(), String(p.goalId), { title: p.title as string | undefined, status: p.status as string | undefined })}`,
+					`Revised Goal ${String(p.goalId)} at ${reviseGoal(this.associationRoot(), String(p.goalId), { title: p.title as string | undefined, status: p.status as string | undefined, memory: p.memory as string | undefined })}`,
+				);
+			},
+		);
+		this.controllerTool(
+			_session,
+			"update_goal_memory",
+			"Update only the durable cross-Task Memory field in Goal Markdown.",
+			{
+				type: "object",
+				properties: { goalId: { type: "string" }, memory: { type: "string" } },
+				required: ["goalId", "memory"],
+				additionalProperties: false,
+			} as AgentTool["parameters"],
+			async (_id, raw) => {
+				const p = raw as { goalId: string; memory: string };
+				return text(
+					`Updated Goal memory for ${p.goalId} at ${updateGoalMemory(this.associationRoot(), p.goalId, p.memory)}`,
+				);
+			},
+		);
+		this.controllerTool(
+			_session,
+			"update_plan_memory",
+			"Update only the current Coordination memory field in .pi/<goal-id>/plan.md; Task DAG and cross-Task strategy remain Plan authority.",
+			{
+				type: "object",
+				properties: { goalId: { type: "string" }, memory: { type: "string" } },
+				required: ["goalId", "memory"],
+				additionalProperties: false,
+			} as AgentTool["parameters"],
+			async (_id, raw) => {
+				const p = raw as { goalId: string; memory: string };
+				return text(
+					`Updated Plan coordination memory for ${p.goalId} at ${updatePlanMemory(this.associationRoot(), p.goalId, p.memory)}`,
 				);
 			},
 		);
@@ -870,6 +922,8 @@ export class AgentSessionRuntime {
 			..._session.getActiveToolNames(),
 			"create_goal",
 			"revise_goal",
+			"update_goal_memory",
+			"update_plan_memory",
 			"create_task",
 			"revise_task",
 			"inspect_task",

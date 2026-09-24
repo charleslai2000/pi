@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { fauxAssistantMessage, registerFauxProvider } from "@earendil-works/pi-ai/compat";
@@ -9,7 +9,7 @@ import { createAgentSessionFromServices, createAgentSessionServices } from "../s
 import { AuthStorage } from "../src/core/auth-storage.ts";
 import { readAssociations } from "../src/core/control/associations.ts";
 import { readExecutionAttempts } from "../src/core/control/execution-attempts.ts";
-import { readTask } from "../src/core/control/read-model.ts";
+import { readGoal, readTask } from "../src/core/control/read-model.ts";
 import { ModelRuntime } from "../src/core/model-runtime.ts";
 import { setPiRoot } from "../src/core/pi-root.ts";
 import { getDefaultSessionDir, SessionManager } from "../src/core/session-manager.ts";
@@ -202,6 +202,8 @@ describe("Controller Task/Executor tools", () => {
 			expect.arrayContaining([
 				"create_task",
 				"revise_task",
+				"update_goal_memory",
+				"update_plan_memory",
 				"list_agents",
 				"inspect_agent",
 				"inspect_task",
@@ -211,6 +213,12 @@ describe("Controller Task/Executor tools", () => {
 			]),
 		);
 		expect(readAssociations(value.root).current).toEqual([]);
+		await call(value.controllerSession, "update_goal_memory", { goalId: "goal-a", memory: "Cross-Task invariant" });
+		await call(value.controllerSession, "update_plan_memory", { goalId: "goal-a", memory: "T001 before T002" });
+		expect(readGoal(value.root, "goal-a").content).toContain("Memory: Cross-Task invariant");
+		expect(readFileSync(join(value.root, ".pi", "goal-a", "plan.md"), "utf8")).toContain(
+			"Coordination memory: T001 before T002",
+		);
 		const catalog = JSON.parse(toolText(await call(value.controllerSession, "list_agents", {}))) as Array<{
 			agentSlug: string;
 		}>;

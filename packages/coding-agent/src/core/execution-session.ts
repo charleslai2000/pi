@@ -41,9 +41,9 @@ export function buildExecutionTaskContext(root: string, goalId: string, taskId: 
 		return `${identity.goalId}/${identity.taskId} (${prerequisite.status ?? "status unspecified"}):\n${prerequisite.content}`;
 	});
 	return [
-		`Goal context (${goal.goalId}):\n${goal.content}`,
-		`Plan current strategy and coordination:\n${plan}`,
-		...(dependencies.length ? [`Task prerequisites and dependency context:\n${dependencies.join("\n\n")}`] : []),
+		`Goal relevant context (${goal.goalId}):\n${goal.content}`,
+		`Plan current strategy and coordination memory:\n${plan}`,
+		...(dependencies.length ? [`Relevant prerequisite Task context:\n${dependencies.join("\n\n")}`] : []),
 		`Current Task (${task.taskId}) full definition, lifecycle, completion, memory, remaining, and evidence:\n${task.content}`,
 	].join("\n\n");
 }
