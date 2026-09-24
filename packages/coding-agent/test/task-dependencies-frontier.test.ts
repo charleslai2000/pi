@@ -16,8 +16,8 @@ const roots: string[] = [];
 function setup(): string {
 	const root = mkdtempSync(join("/tmp", "pi-task-deps-"));
 	roots.push(root);
-	mkdirSync(join(root, "control", "goal-a", "tasks"), { recursive: true });
-	writeFileSync(join(root, "control", "goal-a", "goal.md"), "# Goal A\n");
+	mkdirSync(join(root, ".pi", "goal-a"), { recursive: true });
+	writeFileSync(join(root, ".pi", "goal-a", "goal.md"), "# Goal A\n");
 	setPiRoot(root);
 	return root;
 }
@@ -73,7 +73,7 @@ describe("Task dependencies and derived frontier", () => {
 		await updateTaskStatus(root, "goal-a", "T002", { status: "ACTIVE" });
 		await expect(setTaskDependencies(root, "goal-a", "T002", [], () => true)).rejects.toThrow("tenure");
 		expect(readTask(root, "goal-a", "T002").prerequisites).toEqual([{ goalId: "goal-a", taskId: "T001" }]);
-		expect(existsSync(join(root, "control", "frontier.md"))).toBe(false);
+		expect(existsSync(join(root, ".pi", "frontier.md"))).toBe(false);
 		expect(readAssociations(root).current).toEqual([]);
 	});
 });
