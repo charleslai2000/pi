@@ -57,6 +57,30 @@ describe("Task terminal mutations", () => {
 		await expect(completeTask(value.root, "goal-a", "T001")).rejects.toBeInstanceOf(TaskMutationError);
 	});
 
+	it("adds a missing Remaining field when completing a legacy Task", async () => {
+		const value = fixture();
+		writeFileSync(value.taskPath, "Status: ACTIVE\nObjective: legacy task without Remaining\nResult: old\n");
+
+		const result = await completeTask(value.root, "goal-a", "T001", { remaining: "follow up" });
+
+		expect(result.task.status).toBe("DONE");
+		expect(result.task.remaining).toBe("follow up");
+		expect(readFileSync(value.taskPath, "utf8")).toBe(
+			"Status: DONE\nObjective: legacy task without Remaining\nResult: old\nRemaining: follow up\n",
+		);
+	});
+
+	it("rejects duplicate Remaining fields rather than mutating ambiguous Task content", async () => {
+		const value = fixture();
+		writeFileSync(
+			value.taskPath,
+			"Status: ACTIVE\nObjective: duplicate field\nRemaining: first\nRemaining: second\n",
+		);
+		await expect(completeTask(value.root, "goal-a", "T001", { remaining: "follow up" })).rejects.toThrow(
+			"Task must contain exactly one Remaining: field",
+		);
+	});
+
 	it("rejects invalid current Status", async () => {
 		const value = fixture("UNKNOWN");
 		await expect(completeTask(value.root, "goal-a", "T001")).rejects.toBeInstanceOf(TaskMutationError);

@@ -30,13 +30,27 @@ export interface TaskMutationResult {
 	readonly task: TaskRecord;
 }
 
-function replaceField(content: string, field: "Status" | "Result" | "Remaining" | "Memory", value: string): string {
+function replaceField(
+	content: string,
+	field: "Status" | "Result" | "Remaining" | "Memory",
+	value: string,
+	addIfMissing = false,
+): string {
 	const lines = content.split(/(\r?\n)/);
 	const matches: number[] = [];
 	for (let index = 0; index < lines.length; index += 2) {
 		if (new RegExp(`^${field}:\\s*`).test(lines[index] ?? "")) matches.push(index);
 	}
-	if (matches.length !== 1) throw new TaskMutationError(`Task must contain exactly one ${field}: field`);
+	if (matches.length > 1 || (matches.length === 0 && !addIfMissing))
+		throw new TaskMutationError(`Task must contain exactly one ${field}: field`);
+	if (matches.length === 0) {
+		const statusIndex = lines.findIndex((line, index) => index % 2 === 0 && /^Status:\s*/.test(line ?? ""));
+		if (statusIndex < 0) throw new TaskMutationError("Task must contain exactly one Status: field");
+		const newline = lines.some((line, index) => index % 2 === 1 && line === "\r\n") ? "\r\n" : "\n";
+		return content.endsWith(newline)
+			? `${content}${field}: ${value}${newline}`
+			: `${content}${newline}${field}: ${value}`;
+	}
 	const index = matches[0]!;
 	const line = lines[index]!;
 	const newline = line.includes("\r") ? "\r\n" : "\n";
@@ -81,7 +95,7 @@ function mutateTerminal(
 		if (isTerminalTaskStatus(current)) throw new TaskMutationError(`Task is already terminal: ${goalId}/${taskId}`);
 		let content = replaceField(task.content, "Status", target);
 		if (options?.result !== undefined) content = replaceField(content, "Result", options.result);
-		if (options?.remaining !== undefined) content = replaceField(content, "Remaining", options.remaining);
+		if (options?.remaining !== undefined) content = replaceField(content, "Remaining", options.remaining, true);
 		writeTask(task.path, content);
 		return { changed: true, task: readTask(piRoot, goalId, taskId) };
 	});
@@ -100,7 +114,7 @@ export function updateTaskStatus(
 		if (isTerminalTaskStatus(current)) throw new TaskMutationError(`Task is already terminal: ${goalId}/${taskId}`);
 		let content = replaceField(task.content, "Status", options.status);
 		if (options.result !== undefined) content = replaceField(content, "Result", options.result);
-		if (options.remaining !== undefined) content = replaceField(content, "Remaining", options.remaining);
+		if (options.remaining !== undefined) content = replaceField(content, "Remaining", options.remaining, true);
 		writeTask(task.path, content);
 		return { changed: true, task: readTask(piRoot, goalId, taskId) };
 	});
