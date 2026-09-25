@@ -12,6 +12,7 @@ import {
 import { join } from "node:path";
 import { listTasks, readGoal, readTask, resolveControlDirectory, type TaskRecord } from "./read-model.ts";
 import { withTaskMutationLock } from "./task-lock.ts";
+import { replaceTaskField, type TaskField, TaskMutationError, validateTaskRemainingField } from "./task-mutations.ts";
 import { isTerminalTaskStatus, parseTaskStatus } from "./task-status.ts";
 
 export interface GoalDefinitionInput {
@@ -89,14 +90,6 @@ function replaceManagedField(content: string, name: "Memory" | "Coordination mem
 	return `${content.slice(0, start)}${name}: ${value}${end < 0 ? "\n" : content.slice(end)}`;
 }
 
-function field(content: string, name: string, value: string): string {
-	const lines = content.split(/(\r?\n)/);
-	const index = lines.findIndex((line, i) => i % 2 === 0 && line.startsWith(`${name}:`));
-	if (index < 0) throw new Error(`Task must contain ${name}: field`);
-	lines[index] = `${name}: ${value}`;
-	return lines.join("");
-}
-
 function atomicWrite(path: string, content: string): void {
 	const temporary = `${path}.${process.pid}.${Date.now()}.tmp`;
 	try {
@@ -139,6 +132,16 @@ export function createTask(
 	const completion = validateText(definition.completion, "completion", true)!;
 	const constraints = validateText(definition.constraints, "constraints");
 	const inputs = validateText(definition.inputs, "inputs");
+	if (
+		[objective, completion, constraints ?? "", inputs ?? ""].some((value) =>
+			value
+				.split(/\r?\n/)
+				.some((line) =>
+					/^(?:Status|Result|Remaining|Memory|Objective|Constraints|Inputs|Completion):\s*/.test(line),
+				),
+		)
+	)
+		throw new TaskMutationError("Task field values must not inject canonical Task fields");
 	const directory = readTaskDirectory(piRoot, goalId);
 	const path = join(directory, `${taskId}-${slug}.md`);
 	const content = [
@@ -171,6 +174,7 @@ export function reviseTask(
 ): Promise<TaskRecord> {
 	return withTaskMutationLock(`${piRoot}\u0000${goalId}\u0000${taskId}`, () => {
 		const task = readTask(piRoot, goalId, taskId);
+		validateTaskRemainingField(task.content);
 		const status = parseTaskStatus(task.status);
 		if (!status) throw new Error(`Task has invalid Status: ${goalId}/${taskId}`);
 		if (isTerminalTaskStatus(status)) throw new Error(`Task is terminal: ${goalId}/${taskId}`);
@@ -180,7 +184,8 @@ export function reviseTask(
 				throw new Error(`Invalid Task definition field: ${name}`);
 			if (value === undefined) continue;
 			const checked = validateText(value, name, name === "objective" || name === "completion");
-			if (checked !== undefined) content = field(content, name[0]!.toUpperCase() + name.slice(1), checked);
+			if (checked !== undefined)
+				content = replaceTaskField(content, (name[0]!.toUpperCase() + name.slice(1)) as TaskField, checked);
 		}
 		atomicWrite(task.path, content);
 		return readTask(piRoot, goalId, taskId);

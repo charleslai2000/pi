@@ -30,26 +30,46 @@ export interface TaskMutationResult {
 	readonly task: TaskRecord;
 }
 
-function replaceField(
+export function validateTaskRemainingField(content: string, allowMissing = false): void {
+	const matches = content.split(/\r?\n/).filter((line) => /^Remaining:\s*/.test(line));
+	if (matches.length > 1 || (matches.length === 0 && !allowMissing))
+		throw new TaskMutationError("Task must contain exactly one Remaining: field");
+}
+
+export type TaskField =
+	| "Status"
+	| "Result"
+	| "Remaining"
+	| "Memory"
+	| "Objective"
+	| "Constraints"
+	| "Inputs"
+	| "Completion";
+
+export function replaceTaskField(
 	content: string,
-	field: "Status" | "Result" | "Remaining" | "Memory",
+	field: TaskField,
 	value: string,
-	addIfMissing = false,
+	addRemainingIfMissing = false,
 ): string {
+	if (
+		value
+			.split(/\r?\n/)
+			.some((line) => /^(?:Status|Result|Remaining|Memory|Objective|Constraints|Inputs|Completion):\s*/.test(line))
+	)
+		throw new TaskMutationError("Task field values must not inject canonical Task fields");
 	const lines = content.split(/(\r?\n)/);
 	const matches: number[] = [];
 	for (let index = 0; index < lines.length; index += 2) {
 		if (new RegExp(`^${field}:\\s*`).test(lines[index] ?? "")) matches.push(index);
 	}
-	if (matches.length > 1 || (matches.length === 0 && !addIfMissing))
+	if (matches.length > 1 || (matches.length === 0 && !(field === "Remaining" && addRemainingIfMissing)))
 		throw new TaskMutationError(`Task must contain exactly one ${field}: field`);
 	if (matches.length === 0) {
-		const statusIndex = lines.findIndex((line, index) => index % 2 === 0 && /^Status:\s*/.test(line ?? ""));
-		if (statusIndex < 0) throw new TaskMutationError("Task must contain exactly one Status: field");
 		const newline = lines.some((line, index) => index % 2 === 1 && line === "\r\n") ? "\r\n" : "\n";
 		return content.endsWith(newline)
-			? `${content}${field}: ${value}${newline}`
-			: `${content}${newline}${field}: ${value}`;
+			? `${content}Remaining: ${value}${newline}`
+			: `${content}${newline}Remaining: ${value}`;
 	}
 	const index = matches[0]!;
 	const line = lines[index]!;
@@ -91,11 +111,15 @@ function mutateTerminal(
 		const task = readTask(piRoot, goalId, taskId);
 		const current = parseTaskStatus(task.status);
 		if (current === undefined) throw new TaskMutationError(`Task has invalid Status: ${goalId}/${taskId}`);
-		if (current === target) return { changed: false, task };
+		if (current === target) {
+			validateTaskRemainingField(task.content);
+			return { changed: false, task };
+		}
 		if (isTerminalTaskStatus(current)) throw new TaskMutationError(`Task is already terminal: ${goalId}/${taskId}`);
-		let content = replaceField(task.content, "Status", target);
-		if (options?.result !== undefined) content = replaceField(content, "Result", options.result);
-		if (options?.remaining !== undefined) content = replaceField(content, "Remaining", options.remaining, true);
+		validateTaskRemainingField(task.content, options?.remaining !== undefined);
+		let content = replaceTaskField(task.content, "Status", target);
+		if (options?.result !== undefined) content = replaceTaskField(content, "Result", options.result);
+		if (options?.remaining !== undefined) content = replaceTaskField(content, "Remaining", options.remaining, true);
 		writeTask(task.path, content);
 		return { changed: true, task: readTask(piRoot, goalId, taskId) };
 	});
@@ -109,12 +133,13 @@ export function updateTaskStatus(
 ): Promise<TaskMutationResult> {
 	return withTaskMutationLock(`${piRoot}\u0000${goalId}\u0000${taskId}`, () => {
 		const task = readTask(piRoot, goalId, taskId);
+		validateTaskRemainingField(task.content, options.remaining !== undefined);
 		const current = parseTaskStatus(task.status);
 		if (current === undefined) throw new TaskMutationError(`Task has invalid Status: ${goalId}/${taskId}`);
 		if (isTerminalTaskStatus(current)) throw new TaskMutationError(`Task is already terminal: ${goalId}/${taskId}`);
-		let content = replaceField(task.content, "Status", options.status);
-		if (options.result !== undefined) content = replaceField(content, "Result", options.result);
-		if (options.remaining !== undefined) content = replaceField(content, "Remaining", options.remaining, true);
+		let content = replaceTaskField(task.content, "Status", options.status);
+		if (options.result !== undefined) content = replaceTaskField(content, "Result", options.result);
+		if (options.remaining !== undefined) content = replaceTaskField(content, "Remaining", options.remaining, true);
 		writeTask(task.path, content);
 		return { changed: true, task: readTask(piRoot, goalId, taskId) };
 	});
@@ -128,13 +153,30 @@ export function updateTaskMemory(
 ): Promise<TaskMutationResult> {
 	return withTaskMutationLock(`${piRoot}\u0000${goalId}\u0000${taskId}`, () => {
 		const task = readTask(piRoot, goalId, taskId);
+		validateTaskRemainingField(task.content);
 		const current = parseTaskStatus(task.status);
 		if (current === undefined) throw new TaskMutationError(`Task has invalid Status: ${goalId}/${taskId}`);
 		if (isTerminalTaskStatus(current)) throw new TaskMutationError(`Task is already terminal: ${goalId}/${taskId}`);
+		if (
+			options.memory
+				.split(/\r?\n/)
+				.some((line) =>
+					/^(?:Status|Result|Remaining|Memory|Objective|Constraints|Inputs|Completion):\s*/.test(line),
+				)
+		)
+			throw new TaskMutationError("Task field values must not inject canonical Task fields");
+		if (
+			options.memory
+				.split(/\r?\n/)
+				.some((line) =>
+					/^(?:Status|Result|Remaining|Memory|Objective|Constraints|Inputs|Completion):\s*/.test(line),
+				)
+		)
+			throw new TaskMutationError("Task field values must not inject canonical Task fields");
 		const content =
 			task.memory === undefined
 				? `${task.content.trimEnd()}\n\nMemory: ${options.memory}\n`
-				: replaceField(task.content, "Memory", options.memory);
+				: replaceTaskField(task.content, "Memory", options.memory);
 		writeTask(task.path, content);
 		return { changed: true, task: readTask(piRoot, goalId, taskId) };
 	});

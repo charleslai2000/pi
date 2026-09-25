@@ -1,6 +1,7 @@
 import { closeSync, fsyncSync, openSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { readTask, type TaskRecord } from "./read-model.ts";
 import { withTaskMutationLock } from "./task-lock.ts";
+import { validateTaskRemainingField } from "./task-mutations.ts";
 import { isTerminalTaskStatus, parseTaskStatus } from "./task-status.ts";
 
 export interface TaskIdentity {
@@ -34,6 +35,7 @@ function atomicWrite(path: string, content: string): void {
 }
 
 function replacePrerequisites(content: string, prerequisites: readonly TaskIdentity[]): string {
+	validateTaskRemainingField(content);
 	const lines = content.split(/(\r?\n)/);
 	const index = lines.findIndex((line, i) => i % 2 === 0 && line.startsWith("Prerequisites:"));
 	const value = prerequisites.map((item) => `${item.goalId}/${item.taskId}`).join(", ");
@@ -64,6 +66,7 @@ export function setTaskDependencies(
 		const status = parseTaskStatus(task.status);
 		if (!status) throw new Error(`Task has invalid Status: ${goalId}/${taskId}`);
 		if (isTerminalTaskStatus(status)) throw new Error(`Task is terminal: ${goalId}/${taskId}`);
+		validateTaskRemainingField(task.content);
 		if ((status === "ACTIVE" || status === "BLOCKED") && isTenured(goalId, taskId))
 			throw new Error(`Task has an active Executor tenure: ${goalId}/${taskId}`);
 		const unique = new Set<string>();

@@ -88,6 +88,7 @@ async function setup(): Promise<{
 	runtime: AgentSessionRuntime;
 	controllerSession: AgentSession;
 	cleanupFaux: () => void;
+	faux: ReturnType<typeof registerFauxProvider>;
 }> {
 	const root = mkdtempSync(join("/tmp", "pi-controller-tools-"));
 	mkdirSync(join(root, ".pi", "agents"), { recursive: true });
@@ -164,7 +165,7 @@ async function setup(): Promise<{
 		},
 	});
 	Object.defineProperty(runtime, "associationRoot", { value: () => root });
-	return { root, runtime, controllerSession, cleanupFaux };
+	return { root, runtime, controllerSession, cleanupFaux, faux };
 }
 
 function toolText(result: unknown): string {
@@ -278,6 +279,31 @@ describe("Controller Task/Executor tools", () => {
 		expect(executor.getActiveToolNames()).toEqual(["task_gate"]);
 		const gate = executor.agent.state.tools.find((tool) => tool.name === "task_gate")!;
 		await gate.execute("test", { decision: "accept" });
+		writeFileSync(
+			join(value.root, ".pi", "goal-a", "T001-native.md"),
+			readFileSync(join(value.root, ".pi", "goal-a", "T001-native.md"), "utf8").replace(
+				"Remaining:",
+				`Remaining: one\nRemaining: two`,
+			),
+		);
+		const originalConsoleError = console.error;
+		const consoleErrors: unknown[][] = [];
+		console.error = (...args: unknown[]) => consoleErrors.push(args);
+		try {
+			value.faux.appendResponses([
+				fauxAssistantMessage(
+					'<pi-executor-stop>{"reason":"completed","result":"should not apply","remaining":"done"}</pi-executor-stop>',
+				),
+			]);
+			await executor.prompt("settle current task");
+			await executor.agent.waitForIdle();
+			await new Promise((resolve) => setTimeout(resolve, 50));
+		} finally {
+			console.error = originalConsoleError;
+		}
+		expect(readTask(value.root, "goal-a", "T001").status).toBe("ACTIVE");
+		expect(readAssociations(value.root).current).toHaveLength(1);
+		expect(consoleErrors.length).toBeGreaterThan(0);
 		expect(executor.getActiveToolNames()).toEqual(
 			expect.arrayContaining(["task_memory", "read", "write", "edit", "bash"]),
 		);
@@ -290,16 +316,16 @@ describe("Controller Task/Executor tools", () => {
 			inputs: "Target: goal-a/T001; result: partial; check acceptance and risks",
 			completion: "Record PASS or findings in this review Task",
 		});
-		await call(value.controllerSession, "close_task", { goalId: "goal-a", taskId: "T001", outcome: "cancelled" });
+		// T001 remains ACTIVE/assigned after the rejected settlement mutation above.
 		await call(value.controllerSession, "set_task_dependencies", {
 			goalId: "goal-a",
 			taskId: "T003",
 			prerequisites: [{ goalId: "goal-a", taskId: "T001" }],
 		});
 		const reviewFrontier = await call(value.controllerSession, "inspect_frontier", {});
-		expect(JSON.stringify(reviewFrontier)).not.toContain("T003");
-		expect(readTask(value.root, "goal-a", "T001").status).toBe("CANCELLED");
-		expect(readAssociations(value.root).current).toEqual([]);
+		expect(JSON.stringify(reviewFrontier)).toContain("[]");
+		expect(readTask(value.root, "goal-a", "T001").status).toBe("ACTIVE");
+		expect(readAssociations(value.root).current).toHaveLength(1);
 		expect(readExecutionAttempts(value.root).attempts).toEqual([]);
 		await value.runtime.dispose();
 		value.controllerSession.dispose();

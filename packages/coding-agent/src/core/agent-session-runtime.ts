@@ -330,6 +330,44 @@ export class AgentSessionRuntime {
 		);
 	}
 
+	private reportTaskLifecycleError(
+		goalId: string,
+		taskId: string,
+		phase: string,
+		error: unknown,
+		sessionId?: string,
+	): void {
+		const detail = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+		const message = `Task ${goalId}/${taskId} ${phase} failed; lifecycle authority was not advanced. ${detail}`;
+		this._diagnostics.push({ type: "error", message });
+		console.error(message, error);
+		if (sessionId)
+			this._sessionPool
+				.findBySessionId(sessionId)
+				?.session.sendCustomMessage({
+					customType: "control_event",
+					content: message,
+					display: true,
+					details: { source: "task_lifecycle_error" },
+				})
+				.catch((notifyError: unknown) => {
+					this._diagnostics.push({
+						type: "error",
+						message: `Could not surface Task lifecycle error to Executor: ${String(notifyError)}`,
+					});
+					console.error("Could not surface Task lifecycle error:", notifyError);
+				});
+		void this.notifyController(`${goalId}/${taskId}:error:${phase}:${detail}`, message).catch(
+			(notifyError: unknown) => {
+				this._diagnostics.push({
+					type: "error",
+					message: `Could not notify Controller about ${goalId}/${taskId} ${phase} failure: ${String(notifyError)}`,
+				});
+				console.error(`Could not notify Controller about ${goalId}/${taskId} ${phase} failure:`, notifyError);
+			},
+		);
+	}
+
 	private async notifyTaskChange(
 		goalId: string,
 		taskId: string,
@@ -981,6 +1019,8 @@ export class AgentSessionRuntime {
 					const current = readTask(piRoot, goalId, taskId);
 					if (parseTaskStatus(current.status) === "BLOCKED")
 						await updateTaskStatus(piRoot, goalId, taskId, { status: "ACTIVE" });
+				}).catch((error: unknown) => {
+					this.reportTaskLifecycleError(goalId, taskId, "activation", error);
 				});
 				return;
 			}
@@ -1036,9 +1076,13 @@ export class AgentSessionRuntime {
 						reason: envelope ? `executor stop reason: ${reason}` : "protocol violation",
 					};
 				}
-			}).then(async (notice) => {
-				if (notice) await this.notifyTaskChange(goalId, taskId, notice.status, sessionId, notice.reason);
-			});
+			})
+				.then(async (notice) => {
+					if (notice) await this.notifyTaskChange(goalId, taskId, notice.status, sessionId, notice.reason);
+				})
+				.catch((error: unknown) => {
+					this.reportTaskLifecycleError(goalId, taskId, "settlement", error, sessionId);
+				});
 		});
 		const taskGate = slot.session.installTemporaryTool({
 			name: "task_gate",
@@ -1295,7 +1339,7 @@ export class AgentSessionRuntime {
 			this._sessionPool.removeClosed(this.replacementSlot.id);
 			this.replacementSlot = undefined;
 		}
-		this._diagnostics = result.diagnostics;
+		this._diagnostics = [...this._diagnostics, ...result.diagnostics];
 		this._modelFallbackMessage = result.modelFallbackMessage;
 		return slot;
 	}
