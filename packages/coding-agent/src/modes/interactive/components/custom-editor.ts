@@ -19,6 +19,7 @@ export class CustomEditor extends Editor {
 	// Special handlers that can be dynamically replaced
 	public onEscape?: () => void;
 	public onCtrlD?: () => void;
+	public onEmptyCursorLeft?: () => boolean;
 	public onPasteImage?: () => void;
 	/** Handler for extension-registered shortcuts. Returns true if handled. */
 	public onExtensionShortcut?: (data: string) => boolean;
@@ -141,6 +142,14 @@ export class CustomEditor extends Editor {
 				return;
 			}
 		}
+
+		if (
+			this.getText().length === 0 &&
+			!this.isShowingAutocomplete() &&
+			this.keybindings.matches(data, "tui.editor.cursorLeft") &&
+			this.onEmptyCursorLeft?.()
+		)
+			return;
 
 		// Pass to parent for editor handling
 		super.handleInput(data);

@@ -51,6 +51,7 @@ export class FooterComponent implements Component {
 	private autoCompactEnabled = true;
 	private session: AgentSession;
 	private footerData: ReadonlyFooterDataProvider;
+	private sessionProjection = "";
 
 	constructor(session: AgentSession, footerData: ReadonlyFooterDataProvider) {
 		this.session = session;
@@ -63,6 +64,10 @@ export class FooterComponent implements Component {
 
 	setAutoCompactEnabled(enabled: boolean): void {
 		this.autoCompactEnabled = enabled;
+	}
+
+	setSessionProjectionStatus(text: string): void {
+		this.sessionProjection = text;
 	}
 
 	/**
@@ -229,7 +234,15 @@ export class FooterComponent implements Component {
 		const dimRemainder = theme.fg("dim", remainder);
 
 		const pwdLine = truncateToWidth(theme.fg("dim", pwd), width, theme.fg("dim", "..."));
-		const lines = [pwdLine, dimStatsLeft + dimRemainder];
+		const sessionStatus = this.sessionProjection ? truncateToWidth(this.sessionProjection, width, "...") : "";
+		const sessionStatusLine = sessionStatus
+			? `${" ".repeat(Math.max(0, width - visibleWidth(sessionStatus)))}${sessionStatus}`
+			: "";
+		const lines = [
+			pwdLine,
+			dimStatsLeft + dimRemainder,
+			...(sessionStatusLine ? [theme.fg("dim", sessionStatusLine)] : []),
+		];
 
 		// Add extension statuses on a single line, sorted by key alphabetically
 		const extensionStatuses = this.footerData.getExtensionStatuses();

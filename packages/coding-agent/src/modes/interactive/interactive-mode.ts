@@ -113,7 +113,7 @@ import {
 	sessionEntryToContextMessages,
 	type UsageEntry,
 } from "../../core/session-manager.ts";
-import { syncSessionRegistryName } from "../../core/session-registry.ts";
+import { getSessionRegistry, syncSessionRegistryName } from "../../core/session-registry.ts";
 import type { FullscreenExitOutput, TuiMode } from "../../core/settings-manager.ts";
 import { BUILTIN_SLASH_COMMANDS } from "../../core/slash-commands.ts";
 import type { SourceInfo } from "../../core/source-info.ts";
@@ -150,6 +150,7 @@ import { ExtensionInputComponent } from "./components/extension-input.ts";
 import { ExtensionSelectorComponent } from "./components/extension-selector.ts";
 import { FooterComponent, formatTokens } from "./components/footer.ts";
 import { formatKeyText, keyDisplayText, keyHint, keyText, rawKeyHint } from "./components/keybinding-hints.ts";
+import { projectLiveSessionCounts } from "./components/live-session-projection.ts";
 import { LiveSessionSelector } from "./components/live-session-selector.ts";
 import { LoginDialogComponent } from "./components/login-dialog.ts";
 import { createMermaidMarkdownTransformer } from "./components/mermaid.ts";
@@ -428,6 +429,7 @@ export class InteractiveMode {
 	private footer: FooterComponent;
 	private footerContainer: Container;
 	private footerDataProvider: FooterDataProvider;
+
 	// Stored so the same manager can be injected into custom editors, selectors, and extension UI.
 	private keybindings: KeybindingsManager;
 	private version: string;
@@ -478,6 +480,7 @@ export class InteractiveMode {
 
 	// Agent subscription unsubscribe function
 	private unsubscribe?: () => void;
+	private unsubscribeSessionActivity?: () => void;
 	private signalCleanupHandlers: Array<() => void> = [];
 
 	// Track if editor is in bash mode (text starts with !)
@@ -561,7 +564,7 @@ export class InteractiveMode {
 		this.runtimeHost.setBeforeForegroundSwitch(() => {
 			this.resetExtensionUI();
 		});
-		this.runtimeHost.subscribeActivity((event) => {
+		this.unsubscribeSessionActivity = this.runtimeHost.subscribeActivity((event) => {
 			if (event.type === "conflict") {
 				const names = event.slots.map((slot) => slot.session.sessionName ?? slot.id).join(" and ");
 				this.showWarning(
@@ -576,7 +579,7 @@ export class InteractiveMode {
 						: `Session "${title}" completed in background`,
 				);
 			}
-			this.ui.requestRender();
+			this.updateSessionProjectionStatus();
 		});
 		this.runtimeHost.setBeforeSessionInvalidate(() => {
 			this.resetExtensionUI();
@@ -1065,8 +1068,9 @@ export class InteractiveMode {
 			this.ui.requestRender();
 		});
 
-		// Initialize available provider count for footer display
+		// Initialize available provider count and live Session projection for the footer.
 		await this.updateAvailableProviderCount();
+		this.updateSessionProjectionStatus();
 
 		// Flush the completed startup state before loading the remaining syntax grammars.
 		this.ui.renderNow();
@@ -2781,6 +2785,9 @@ export class InteractiveMode {
 			// Wire up callbacks from the default editor
 			newEditor.onSubmit = this.defaultEditor.onSubmit;
 			newEditor.onChange = this.defaultEditor.onChange;
+			if ("onEmptyCursorLeft" in (newEditor as object)) {
+				(newEditor as CustomEditor).onEmptyCursorLeft = () => this.handleEmptyComposerLeft();
+			}
 
 			// Copy text from previous editor
 			newEditor.setText(currentText);
@@ -2961,6 +2968,7 @@ export class InteractiveMode {
 	// =========================================================================
 
 	private setupKeyHandlers(): void {
+		this.defaultEditor.onEmptyCursorLeft = () => this.handleEmptyComposerLeft();
 		// Set up handlers on defaultEditor - they use this.editor for text access
 		// so they work correctly regardless of which editor is active
 		this.defaultEditor.onEscape = () => {
@@ -5572,8 +5580,40 @@ export class InteractiveMode {
 		});
 	}
 
+	private handleEmptyComposerLeft(): boolean {
+		const registry = getSessionRegistry();
+		const controllerId = registry?.canonicalControlSessionId();
+		const currentId = this.sessionManager.getSessionId();
+		if (currentId !== controllerId) {
+			const controllerSlot = controllerId ? this.runtimeHost.sessionPool.findBySessionId(controllerId) : undefined;
+			if (!controllerSlot) return false;
+			void this.runtimeHost
+				.switchForeground(controllerSlot.id)
+				.catch((error: unknown) => this.showError(error instanceof Error ? error.message : String(error)));
+			return true;
+		}
+		this.showLiveSessionSelector();
+		return true;
+	}
+
+	private updateSessionProjectionStatus(): void {
+		const sessions = this.runtimeHost.listActiveSessions();
+		const registry = getSessionRegistry();
+		const controllerId = registry?.canonicalControlSessionId();
+		const counts = projectLiveSessionCounts(sessions, controllerId);
+		this.footer.setSessionProjectionStatus(
+			sessions.length > 1 ? `sessions ${counts.active} active · ${counts.blocked} blocked` : "",
+		);
+		this.footer.invalidate();
+		this.ui.requestRender();
+	}
+
 	private showLiveSessionSelector(): void {
+		const sessions = this.runtimeHost.listActiveSessions();
+		const piRoot = getPiRoot() ?? sessions[0]?.slot.cwd;
+		if (!piRoot) return;
 		this.showSelector((done) => {
+			const controllerId = getSessionRegistry()?.canonicalControlSessionId();
 			const selector = new LiveSessionSelector(
 				this.runtimeHost.listActiveSessions().sort((a, b) => {
 					const rank = (role?: string, busy?: boolean) =>
@@ -5585,6 +5625,10 @@ export class InteractiveMode {
 				}),
 				{
 					foregroundSlotId: this.runtimeHost.sessionPool.foregroundSlotId!,
+					controllerSlotId: controllerId
+						? this.runtimeHost.sessionPool.findBySessionId(controllerId)?.id
+						: undefined,
+					piRoot,
 					onSwitch: async (slotId) => {
 						if (slotId !== this.runtimeHost.sessionPool.foregroundSlotId) {
 							await this.runtimeHost.switchForeground(slotId);
@@ -7113,6 +7157,8 @@ export class InteractiveMode {
 		this.clearStatusIndicator();
 		this.themeController.disableAutoSync();
 		this.clearExtensionTerminalInputListeners();
+		this.unsubscribeSessionActivity?.();
+		this.unsubscribeSessionActivity = undefined;
 		this.footer.dispose();
 		this.footerDataProvider.dispose();
 		if (this.unsubscribe) {

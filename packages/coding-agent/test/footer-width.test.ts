@@ -146,10 +146,12 @@ describe("FooterComponent width handling", () => {
 		});
 		const footer = new FooterComponent(session, createFooterData(2));
 
+		footer.setSessionProjectionStatus("sessions 2 active · 1 blocked");
 		const lines = footer.render(width);
 		for (const line of lines) {
 			expect(visibleWidth(line)).toBeLessThanOrEqual(width);
 		}
+		expect(stripAnsi(lines[2]!)).toContain("sessions 2 active · 1 blocked");
 	});
 
 	it("includes summary and tool result usage in the total cost", () => {

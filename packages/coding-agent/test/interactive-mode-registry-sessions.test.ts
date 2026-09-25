@@ -92,6 +92,8 @@ describe("InteractiveMode Registry session paths", () => {
 		expect([...entries].reverse().find((entry) => entry.type === "session_info")?.name).toBe("architecture");
 		const live: LiveSessionSelector = new LiveSessionSelector(value.pool.list() as never, {
 			foregroundSlotId: controlSlot.id,
+			controllerSlotId: controlSlot.id,
+			piRoot: value.root,
 			onSwitch: () => {},
 			onAbort: () => {},
 			onCancel: () => {},
@@ -200,7 +202,11 @@ describe("InteractiveMode Registry session paths", () => {
 		const done = vi.fn();
 		const runtimeHost = {
 			listActiveSessions: () =>
-				value.registry.activeRows().map((row) => ({ row, slot: value.pool.findBySessionId(row.session_id)! })),
+				value.registry.activeRows().map((row) => ({
+					row,
+					slot: value.pool.findBySessionId(row.session_id)!,
+					...(row.role === "executor" ? { task: { goalId: "goal", taskId: "T001" } } : {}),
+				})),
 			listInactiveSessions: () => value.registry.inactiveRows().filter((row) => row.session_file),
 			sessionPool: value.pool,
 			closeSession: vi.fn(async (slotId: string) => {
@@ -217,6 +223,7 @@ describe("InteractiveMode Registry session paths", () => {
 		};
 		const fakeThis = {
 			runtimeHost,
+			getPiRoot: () => value.root,
 			showStatus: vi.fn(),
 			ui: { requestRender: vi.fn() },
 			keybindings: undefined,
