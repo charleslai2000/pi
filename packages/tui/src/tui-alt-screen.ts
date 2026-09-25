@@ -361,7 +361,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 				? ENABLE_BUTTON_MOTION_MOUSE
 				: ENABLE_ALL_MOTION_MOUSE;
 		this.terminal.write(
-			`${ENTER_ALT_SCREEN}${DISABLE_AUTOWRAP}${this.mouseEnabled ? mouseSequence : ""}\x1b[2J\x1b[H\x1b[?25l`,
+			`${ENTER_ALT_SCREEN}${DISABLE_AUTOWRAP}${this.mouseEnabled ? mouseSequence : ""}\x1b[?1004h\x1b[1 q\x1b[2J\x1b[H\x1b[?25l`,
 		);
 	}
 
@@ -375,7 +375,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		this.flashes.dispose();
 		if (!this.altScreenActive) return;
 		this.terminal.write(
-			`${BEGIN_SYNCHRONIZED_OUTPUT}${this.deleteKittyImages()}${this.mouseEnabled ? DISABLE_MOUSE : ""}${ENABLE_AUTOWRAP}${END_SYNCHRONIZED_OUTPUT}`,
+			`${BEGIN_SYNCHRONIZED_OUTPUT}${this.deleteKittyImages()}${this.mouseEnabled ? DISABLE_MOUSE : ""}\x1b[?1004l\x1b[0 q${ENABLE_AUTOWRAP}${END_SYNCHRONIZED_OUTPUT}`,
 		);
 		this.uploadedKittyImages.clear();
 	}
@@ -657,6 +657,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 
 	private handleViewportInput(data: string): { consume?: boolean } | undefined {
 		if (data === FOCUS_OUT) {
+			this.terminal.write("\x1b[2 q");
 			const hadActiveSelection = this.selectionPressActive;
 			const hadNonEmptyActiveSelection = hadActiveSelection && this.getSelectionBounds() !== undefined;
 			this.selectionPressActive = false;
@@ -678,7 +679,10 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 			this.lastClick = undefined;
 			return { consume: true };
 		}
-		if (data === FOCUS_IN) return { consume: true };
+		if (data === FOCUS_IN) {
+			this.terminal.write("\x1b[1 q");
+			return { consume: true };
+		}
 
 		const wheelEvent = this.parseWheelEvent(data);
 		if (wheelEvent) {

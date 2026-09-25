@@ -7,6 +7,7 @@ import {
 	ProcessTerminal,
 	resolveEscapeTimeoutMs,
 } from "../src/terminal.ts";
+import { TuiMainScreen } from "../src/tui-main-screen.ts";
 
 describe("resolveEscapeTimeoutMs", () => {
 	it("uses PI_TUI_ESC_TIMEOUT when configured", () => {
@@ -253,6 +254,62 @@ describe("ProcessTerminal progress", () => {
 			assert.deepEqual(writes, ["\x1b]9;4;0\x07"]);
 		} finally {
 			process.stdout.write = previousWrite;
+		}
+	});
+});
+
+describe("TUI focus cursor reporting lifecycle", () => {
+	it("enables focus reporting on the direct terminal and restores cursor mode on stop", () => {
+		const terminal = new ProcessTerminal();
+		const writes: string[] = [];
+		const previousWrite = process.stdout.write;
+		const previousStdinOn = process.stdin.on;
+		const previousStdinRemoveListener = process.stdin.removeListener;
+		const previousStdoutOn = process.stdout.on;
+		const previousStdoutRemoveListener = process.stdout.removeListener;
+		const previousStdinSetRawMode = process.stdin.setRawMode;
+		const previousRawDescriptor = Object.getOwnPropertyDescriptor(process.stdin, "isRaw");
+		const previousColumnsDescriptor = Object.getOwnPropertyDescriptor(process.stdout, "columns");
+		const previousRowsDescriptor = Object.getOwnPropertyDescriptor(process.stdout, "rows");
+		process.stdout.write = ((chunk: string | Uint8Array) => {
+			writes.push(String(chunk));
+			return true;
+		}) as typeof process.stdout.write;
+		process.stdin.on = (() => process.stdin) as typeof process.stdin.on;
+		process.stdin.removeListener = (() => process.stdin) as typeof process.stdin.removeListener;
+		process.stdin.setRawMode = (() => process.stdin) as typeof process.stdin.setRawMode;
+		process.stdout.on = (() => process.stdout) as typeof process.stdout.on;
+		process.stdout.removeListener = (() => process.stdout) as typeof process.stdout.removeListener;
+		Object.defineProperty(process.stdin, "isRaw", { value: false, configurable: true });
+		Object.defineProperty(process.stdout, "columns", { value: 80, configurable: true });
+		Object.defineProperty(process.stdout, "rows", { value: 24, configurable: true });
+		try {
+			const tui = new TuiMainScreen(terminal);
+			tui.start();
+			const inputHandler = (terminal as unknown as { inputHandler: (data: string) => void }).inputHandler;
+			inputHandler("\x1b[O");
+			inputHandler("\x1b[I");
+			tui.renderNow(true);
+			tui.stop();
+			const output = writes.join("");
+			assert.ok(output.includes("\x1b[?1004h"));
+			assert.ok(output.includes("\x1b[?1004l"));
+			assert.ok(output.includes("\x1b[1 q"));
+			assert.ok(output.includes("\x1b[0 q"));
+		} finally {
+			process.stdout.write = previousWrite;
+			process.stdin.on = previousStdinOn;
+			process.stdin.removeListener = previousStdinRemoveListener;
+			process.stdin.setRawMode = previousStdinSetRawMode;
+			process.stdout.on = previousStdoutOn;
+			process.stdout.removeListener = previousStdoutRemoveListener;
+			if (previousRawDescriptor) Object.defineProperty(process.stdin, "isRaw", previousRawDescriptor);
+			else Reflect.deleteProperty(process.stdin, "isRaw");
+			if (previousColumnsDescriptor) Object.defineProperty(process.stdout, "columns", previousColumnsDescriptor);
+			else Reflect.deleteProperty(process.stdout, "columns");
+			if (previousRowsDescriptor) Object.defineProperty(process.stdout, "rows", previousRowsDescriptor);
+			else Reflect.deleteProperty(process.stdout, "rows");
+			setKittyProtocolActive(false);
 		}
 	});
 });

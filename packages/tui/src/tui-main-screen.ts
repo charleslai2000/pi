@@ -131,6 +131,8 @@ export class TuiMainScreen extends TuiBase implements TUI {
 	private hardwareCursorRow = 0;
 	private maxLinesRendered = 0;
 	private previousViewportTop = 0;
+	private focused = true;
+	private removeFocusInputListener?: () => void;
 
 	captureRenderState(): TuiMainScreenRenderState {
 		return {
@@ -155,7 +157,27 @@ export class TuiMainScreen extends TuiBase implements TUI {
 		this.previousViewportTop = state.previousViewportTop;
 	}
 
+	protected override beforeTerminalStart(): void {
+		this.removeFocusInputListener?.();
+		this.terminal.write("\x1b[?1004h\x1b[1 q");
+		this.removeFocusInputListener = this.addInputListener((data) => {
+			if (data === "\x1b[O" && this.focused) {
+				this.focused = false;
+				this.requestRender();
+				return { consume: true };
+			}
+			if (data === "\x1b[I" && !this.focused) {
+				this.focused = true;
+				this.requestRender();
+				return { consume: true };
+			}
+			if (data === "\x1b[O" || data === "\x1b[I") return { consume: true };
+			return undefined;
+		});
+	}
+
 	protected override resetRenderState(): void {
+		this.focused = true;
 		this.previousLines = [];
 		this.previousWidth = -1;
 		this.previousHeight = -1;
@@ -166,6 +188,9 @@ export class TuiMainScreen extends TuiBase implements TUI {
 	}
 
 	protected override beforeTerminalStop(options: TuiStopOptions): void {
+		this.removeFocusInputListener?.();
+		this.removeFocusInputListener = undefined;
+		this.terminal.write("\x1b[?1004l\x1b[0 q");
 		if (options.preserveScreen || this.previousLines.length === 0) return;
 		this.terminal.write(" ");
 		const targetRow = this.previousLines.length;
@@ -625,6 +650,7 @@ export class TuiMainScreen extends TuiBase implements TUI {
 			this.terminal.hideCursor();
 			return;
 		}
+		this.terminal.write(this.focused ? "\x1b[1 q" : "\x1b[2 q");
 
 		// Clamp cursor position to valid range
 		const targetRow = Math.max(0, Math.min(cursorPos.row, totalLines - 1));

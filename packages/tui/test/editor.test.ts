@@ -103,6 +103,27 @@ describe("Editor component", () => {
 			assert.deepStrictEqual(editor.getCursor(), { line: 0, col: 0 });
 		});
 
+		it("returns to an empty draft after Up then Down", () => {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+			editor.addToHistory("previous input");
+			editor.handleInput("\x1b[A");
+			assert.strictEqual(editor.getText(), "previous input");
+			editor.handleInput("\x1b[B");
+			assert.strictEqual(editor.getText(), "");
+		});
+
+		it("restores the original non-empty draft at the newest history boundary", () => {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+			editor.addToHistory("previous input");
+			editor.setText("original draft");
+			editor.handleInput("\x1b[A");
+			assert.strictEqual(editor.getText(), "original draft");
+			editor.handleInput("\x1b[A");
+			assert.strictEqual(editor.getText(), "previous input");
+			editor.handleInput("\x1b[B");
+			assert.strictEqual(editor.getText(), "original draft");
+		});
+
 		it("navigates forward through history with Down arrow", () => {
 			const editor = new Editor(createTestTUI(), defaultEditorTheme);
 
@@ -285,6 +306,30 @@ describe("Editor component", () => {
 			editor.handleInput("\x1b[A"); // Up - cursor moves back to line1
 			assert.strictEqual(editor.getText(), "line1\nline2\nline3");
 			assert.deepStrictEqual(editor.getCursor(), { line: 0, col: 0 });
+		});
+	});
+
+	describe("Down-arrow clear behavior", () => {
+		it("moves down within multiline text before clearing at the bottom", () => {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+			editor.setText("first line\nsecond line");
+			editor.render(80);
+			editor.handleInput("\x01");
+			editor.handleInput("\x1b[B");
+			assert.strictEqual(editor.getText(), "first line\nsecond line");
+			editor.handleInput("\x1b[1;5D");
+			editor.handleInput("\x1b[B");
+			editor.handleInput("\x1b[1;5C");
+			editor.handleInput("\x1b[B");
+			assert.strictEqual(editor.getText(), "");
+		});
+
+		it("clears pasted non-history text with Down at the end", () => {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+			editor.handleInput("\x1b[200~pasted content\x1b[201~");
+			assert.strictEqual(editor.getText(), "pasted content");
+			editor.handleInput("\x1b[B");
+			assert.strictEqual(editor.getText(), "");
 		});
 	});
 
@@ -2132,6 +2177,58 @@ describe("Editor component", () => {
 	});
 
 	describe("Autocomplete", () => {
+		it("keeps the editor rows fixed while slash suggestions filter and scroll", async () => {
+			const tui = createTestTUI(40, 24);
+			const editor = new Editor(tui, defaultEditorTheme, { autocompleteMaxVisible: 5 });
+			let items = Array.from({ length: 12 }, (_, index) => ({
+				value: `/command${index}`,
+				label: `command${index}`,
+				...(index === 0 ? { description: "first command" } : {}),
+			}));
+			editor.setAutocompleteProvider({
+				getSuggestions: async (lines, cursorLine, cursorCol) => {
+					const prefix = lines[cursorLine]!.slice(0, cursorCol);
+					return { items: items.filter((item) => item.value.startsWith(prefix)), prefix };
+				},
+				applyCompletion,
+			});
+			editor.focused = true;
+			editor.handleInput("/");
+			await flushAutocomplete();
+			const allSuggestions = editor.render(40);
+			assert.ok(stripVTControlCharacters(allSuggestions.at(-8)!).includes("command"));
+			const composerRow = allSuggestions.findIndex((line) => line.includes("\x1b_pi:c"));
+			assert.ok(composerRow >= 0);
+
+			editor.handleInput("c");
+			items = items.filter((item) => item.value.startsWith("/c"));
+			await flushAutocomplete();
+			const filtered = editor.render(40);
+			assert.strictEqual(
+				filtered.findIndex((line) => line.includes("\x1b_pi:c")),
+				composerRow,
+			);
+			assert.ok(filtered.length >= allSuggestions.length);
+
+			editor.handleInput("\x1b[B");
+			assert.strictEqual(editor.getText(), "/c");
+			assert.strictEqual(editor.isShowingAutocomplete(), true);
+		});
+
+		it("preserves completion Down precedence", async () => {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+			const items = ["/one", "/two", "/three"].map((value) => ({ value, label: value.slice(1) }));
+			editor.setAutocompleteProvider({
+				getSuggestions: async () => ({ items, prefix: "/" }),
+				applyCompletion,
+			});
+			editor.handleInput("/");
+			await flushAutocomplete();
+			editor.handleInput("\x1b[B");
+			assert.strictEqual(editor.getText(), "/");
+			assert.strictEqual(editor.isShowingAutocomplete(), true);
+		});
+
 		it("triggers and debounces symbol completion after CJK punctuation", async (t) => {
 			t.mock.timers.enable({ apis: ["setTimeout"] });
 			for (const before of ["查看，", "\u3000", ..."，．：；！？（）［］｛｝“”‘’…—。、「」『』《》【】"]) {

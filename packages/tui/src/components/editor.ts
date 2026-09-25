@@ -309,6 +309,7 @@ export class Editor implements Component, Focusable {
 	private lastWidth: number = 80;
 	private renderedVisibleLineCount = 1;
 	private renderedAutocompleteHeight = 0;
+	private renderedAutocompleteTopPadding = 0;
 
 	// Vertical scrolling support
 	private scrollOffset: number = 0;
@@ -487,6 +488,32 @@ export class Editor implements Component, Focusable {
 		this.historyDraft = null;
 	}
 
+	private canClearAtDownBoundary(): boolean {
+		if (this.isEditorEmpty()) return false;
+		const visualLines = this.buildVisualLineMap(this.lastWidth);
+		const currentVisualLine = this.findCurrentVisualLine(visualLines);
+		const line = this.state.lines[this.state.cursorLine] ?? "";
+		if (currentVisualLine !== visualLines.length - 1 || this.state.cursorLine !== this.state.lines.length - 1)
+			return false;
+		if (this.state.cursorCol === line.length) return true;
+		return this.state.cursorCol >= line.length - 1;
+	}
+
+	private clearComposer(): void {
+		this.pushUndoSnapshot();
+		this.pastes.clear();
+		this.pasteCounter = 0;
+		this.state = { lines: [""], cursorLine: 0, cursorCol: 0 };
+		this.scrollOffset = 0;
+		this.lastAction = null;
+		this.preferredVisualCol = null;
+		this.snappedFromCursorCol = null;
+		this.exitHistoryBrowsing();
+		this.cancelAutocomplete();
+		this.onChange?.("");
+		this.tui.requestRender();
+	}
+
 	/** Internal setText that doesn't reset history state - used by navigateHistory */
 	private setTextInternal(text: string, cursorPlacement: "start" | "end" = "end"): void {
 		const lines = text.split("\n");
@@ -612,23 +639,31 @@ export class Editor implements Component, Focusable {
 		const linesBelow = layoutLines.length - (this.scrollOffset + visibleLines.length);
 		result.push(this.renderBottomBorder(width, linesBelow));
 
-		// Add autocomplete list if active
+		// Reserve a fixed autocomplete block above the editor body. Its contents are
+		// bottom-aligned so filtering changes the candidate count without shifting the editor.
 		this.renderedAutocompleteHeight = 0;
+		this.renderedAutocompleteTopPadding = 0;
 		if (this.autocompleteState && this.autocompleteList) {
 			const autocompleteResult = this.autocompleteList.render(contentWidth);
 			this.renderedAutocompleteHeight = autocompleteResult.length;
+			const reservedHeight = Math.max(3, this.autocompleteMaxVisible + 1);
+			this.renderedAutocompleteTopPadding = reservedHeight - autocompleteResult.length;
+			const rows = Array.from(
+				{ length: this.renderedAutocompleteTopPadding },
+				() => `${leftPadding}${" ".repeat(contentWidth)}${rightPadding}`,
+			);
 			for (const line of autocompleteResult) {
 				const lineWidth = visibleWidth(line);
 				const linePadding = " ".repeat(Math.max(0, contentWidth - lineWidth));
-				result.push(`${leftPadding}${line}${linePadding}${rightPadding}`);
+				rows.push(`${leftPadding}${line}${linePadding}${rightPadding}`);
 			}
+			return [...rows, ...result];
 		}
-
 		return result;
 	}
 
 	handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
-		const autocompleteStartRow = this.renderedVisibleLineCount + 2;
+		const autocompleteStartRow = this.renderedAutocompleteTopPadding + 1;
 		if (
 			this.autocompleteState &&
 			this.autocompleteList &&
@@ -937,11 +972,10 @@ export class Editor implements Component, Focusable {
 		if (kb.matches(data, "tui.editor.cursorDown")) {
 			if (this.historyIndex > -1 && this.isOnLastVisualLine()) {
 				this.navigateHistory(1);
-			} else if (this.isOnLastVisualLine()) {
-				// Already at bottom - jump to end of line
-				this.moveToLineEnd();
-			} else {
+			} else if (!this.isOnLastVisualLine()) {
 				this.moveCursor(1, 0);
+			} else if (this.canClearAtDownBoundary()) {
+				this.clearComposer();
 			}
 			return;
 		}

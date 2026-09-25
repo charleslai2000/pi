@@ -62,6 +62,31 @@ class RecordingTerminal extends VirtualTerminal {
 }
 
 describe("TuiAltScreen", () => {
+	it("switches the cursor shape on focus changes and restores focus modes on stop", async () => {
+		const terminal = new RecordingTerminal(30, 4);
+		const tui = new TuiAltScreen(terminal);
+		tui.start();
+		await terminal.waitForRender();
+		terminal.events.length = 0;
+
+		terminal.sendInput("\x1b[O");
+		await terminal.waitForRender();
+		assert.ok(terminal.events.some((event) => event.type === "write" && event.data.includes("\x1b[2 q")));
+		terminal.events.length = 0;
+		terminal.sendInput("\x1b[I");
+		await terminal.waitForRender();
+		assert.ok(terminal.events.some((event) => event.type === "write" && event.data.includes("\x1b[1 q")));
+
+		terminal.events.length = 0;
+		tui.stop();
+		const teardown = terminal.events
+			.filter((event): event is { type: "write"; data: string } => event.type === "write")
+			.map((event) => event.data)
+			.join("");
+		assert.ok(teardown.includes("\x1b[?1004l"));
+		assert.ok(teardown.includes("\x1b[0 q"));
+	});
+
 	it("renders a terminal-height viewport and preserves manual scroll position", async () => {
 		const terminal = new VirtualTerminal(20, 4);
 		const tui = new TuiAltScreen(terminal);
@@ -1497,7 +1522,13 @@ describe("TuiAltScreen", () => {
 		terminal.sendInput("\x1b[O");
 		terminal.sendInput("\x1b[I");
 		await terminal.waitForRender();
-		assert.strictEqual(writeCount(), idleWriteCount);
+		const focusWrites = terminal.events
+			.slice(idleWriteCount)
+			.filter((event): event is { type: "write"; data: string } => event.type === "write")
+			.map((event) => event.data)
+			.join("");
+		assert.ok(focusWrites.includes("\x1b[2 q"));
+		assert.ok(focusWrites.includes("\x1b[1 q"));
 
 		// A completed click leaves a zero-width anchor, but later orphaned drag/release events must not extend it.
 		terminal.sendInput("\x1b[<0;1;1M");
@@ -1514,7 +1545,14 @@ describe("TuiAltScreen", () => {
 		terminal.sendInput("\x1b[O");
 		terminal.sendInput("\x1b[I");
 		await terminal.waitForRender();
-		assert.strictEqual(writeCount(), pressedWriteCount);
+		assert.ok(writeCount() >= pressedWriteCount);
+		const pressedFocusWrites = terminal.events
+			.slice(pressedWriteCount)
+			.filter((event): event is { type: "write"; data: string } => event.type === "write")
+			.map((event) => event.data)
+			.join("");
+		assert.ok(pressedFocusWrites.includes("\x1b[2 q"));
+		assert.ok(pressedFocusWrites.includes("\x1b[1 q"));
 		terminal.sendInput("\x1b[<32;4;2M");
 		terminal.sendInput("\x1b[<0;4;2m");
 		await terminal.waitForRender();
@@ -1570,7 +1608,14 @@ describe("TuiAltScreen", () => {
 		terminal.sendInput("\x1b[O");
 		terminal.sendInput("\x1b[I");
 		await terminal.waitForRender();
-		assert.strictEqual(terminal.events.filter((event) => event.type === "write").length, completedWriteCount);
+		assert.strictEqual(terminal.events.filter((event) => event.type === "write").length, completedWriteCount + 2);
+		const focusWrites = terminal.events
+			.slice(-2)
+			.filter((event): event is { type: "write"; data: string } => event.type === "write")
+			.map((event) => event.data)
+			.join("");
+		assert.ok(focusWrites.includes("\x1b[2 q"));
+		assert.ok(focusWrites.includes("\x1b[1 q"));
 
 		const redrawEventCount = terminal.events.length;
 		tui.renderNow(true);
