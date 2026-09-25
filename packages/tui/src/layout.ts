@@ -2,7 +2,7 @@ import type { ScrollView } from "./components/scroll-view.ts";
 import { allocateStackSizes, visibleStackEntries } from "./components/stack.ts";
 import { getLayoutNode } from "./layout-node.ts";
 import { cropKittyImageLine, getKittyImageMetadata, isImageLine } from "./terminal-image.ts";
-import { type Component, CURSOR_MARKER, compositeTuiLine } from "./tui.ts";
+import { type Component, Container, CURSOR_MARKER, compositeTuiLine } from "./tui.ts";
 import {
 	extractAnsiCode,
 	getActiveBackgroundAnsi,
@@ -103,6 +103,10 @@ function updateClips(box: LayoutBox, parentClip: LayoutRect): void {
 	for (const child of box.children) updateClips(child, box.clip);
 }
 
+function isBaseContainerRender(component: Component): boolean {
+	return component.render.toString() === Container.prototype.render.toString();
+}
+
 function layoutComponent(
 	context: LayoutContext,
 	component: Component,
@@ -133,6 +137,41 @@ function layoutComponent(
 		};
 	}
 
+	if (node.type === "container" && !isBaseContainerRender(component)) {
+		const lines = renderCached(context, component, safeWidth);
+		const allocatedHeight = height === undefined ? lines.length : Math.max(0, Math.floor(height));
+		return {
+			component,
+			rect: { x, y, width: safeWidth, height: allocatedHeight },
+			clip: intersect(clip, { x, y, width: safeWidth, height: allocatedHeight }),
+			children: [],
+			lines,
+			layer: 0,
+		};
+	}
+
+	if (node.type === "container") {
+		const children: LayoutBox[] = [];
+		let childY = y;
+		for (const child of node.children) {
+			const childBox = layoutComponent(context, child, x, childY, safeWidth, undefined, clip);
+			children.push(childBox);
+			childY += childBox.rect.height;
+		}
+		const contentHeight = childY - y;
+		const allocatedHeight = height === undefined ? contentHeight : Math.max(0, Math.floor(height));
+		const box: LayoutBox = {
+			component,
+			rect: { x, y, width: safeWidth, height: allocatedHeight },
+			clip: intersect(clip, { x, y, width: safeWidth, height: allocatedHeight }),
+			children,
+			layer: 0,
+		};
+		for (const child of children) child.parent = box;
+		updateClips(box, clip);
+		return box;
+	}
+
 	if (node.type === "scroll") {
 		const previousScrollTop = node.state.scrollTop;
 		const contentWidth = node.state.getContentWidth(safeWidth);
@@ -147,7 +186,20 @@ function layoutComponent(
 		);
 		const contentHeight = childBox.rect.height;
 		const viewportHeight = height === undefined ? contentHeight : Math.max(0, Math.floor(height));
-		node.state.updateLayout(contentHeight, viewportHeight, context.requestRender);
+		const geometry: Array<{ component: Component; key?: string; top: number; height: number }> = [];
+		const collectGeometry = (box: LayoutBox): void => {
+			const contentNode = getLayoutNode(node.component);
+			const key = contentNode?.type === "container" ? contentNode.getAnchorKey(box.component) : undefined;
+			geometry.push({
+				component: box.component,
+				...(key === undefined ? {} : { key }),
+				top: box.rect.y + previousScrollTop,
+				height: box.rect.height,
+			});
+			for (const child of box.children) collectGeometry(child);
+		};
+		collectGeometry(childBox);
+		node.state.updateLayout(contentHeight, viewportHeight, context.requestRender, geometry);
 		translateBox(childBox, previousScrollTop - node.state.scrollTop);
 		const scrollView = node.state as ScrollView;
 		if (node.state.primary || !context.primaryScrollView) context.primaryScrollView = scrollView;

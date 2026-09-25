@@ -1,6 +1,7 @@
 import assert from "node:assert";
 import { describe, it } from "node:test";
 import { HStack } from "../src/components/h-stack.ts";
+import { ScrollAnchorContainer } from "../src/components/scroll-anchor-container.ts";
 import { ScrollView } from "../src/components/scroll-view.ts";
 import { Text } from "../src/components/text.ts";
 import { VStack } from "../src/components/v-stack.ts";
@@ -169,6 +170,58 @@ describe("viewport layout", () => {
 			() => {},
 		);
 		assert.deepStrictEqual(visibleLines(frame.lines), ["shown"]);
+	});
+
+	it("preserves a stable visual anchor through prepend, eviction, reflow, and anchor removal", () => {
+		const make = (key: string, text: string) => {
+			const component = new Text(text, 0, 0);
+			return { key, component };
+		};
+		const content = new ScrollAnchorContainer();
+		let rows = [make("a", "a1"), make("b", "b1\nb2"), make("c", "c1\nc2\nc3"), make("d", "d1"), make("e", "e1\ne2")];
+		const render = (width = 20) => {
+			content.clear();
+			for (const row of rows) {
+				content.addChild(row.component);
+				content.registerAnchor(row.component, row.key);
+			}
+			return renderLayoutFrame(scroll, width, 4, () => {});
+		};
+		const scroll = new ScrollView(content);
+		render();
+		scroll.scrollTo(3);
+		let frame = render();
+		const locate = (key: string): number => {
+			const find = (box: typeof frame.root | undefined): number | undefined => {
+				if (!box) return undefined;
+				if (content.getAnchorKey(box.component) === key) return box.rect.y - frame.root.rect.y;
+				for (const child of box.children) {
+					const found = find(child);
+					if (found !== undefined) return found;
+				}
+				return undefined;
+			};
+			return find(frame.root) ?? -1;
+		};
+		const anchorOffset = locate("c");
+		assert.notStrictEqual(anchorOffset, -1);
+		scroll.preserveVisualAnchor();
+		rows = [make("x", "x1\nx2\nx3\nx4"), ...rows];
+		frame = render();
+		assert.strictEqual(locate("c"), anchorOffset);
+		scroll.preserveVisualAnchor();
+		rows = rows.filter((row) => row.key !== "x");
+		frame = render();
+		assert.strictEqual(locate("c"), anchorOffset);
+		scroll.preserveVisualAnchor();
+		rows = [make("y", "y1\ny2"), ...rows.slice(1)];
+		frame = render(10);
+		assert.strictEqual(locate("c"), anchorOffset);
+		const fallbackOffset = locate("d");
+		scroll.preserveVisualAnchor();
+		rows = rows.filter((row) => row.key !== "c");
+		frame = render();
+		assert.strictEqual(locate("d"), fallbackOffset);
 	});
 
 	it("tracks follow-end state and returns unused scroll delta", () => {

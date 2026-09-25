@@ -19,8 +19,10 @@ export { Input } from "./components/input.ts";
 export { Loader, type LoaderIndicatorOptions } from "./components/loader.ts";
 export { type DefaultTextStyle, Markdown, type MarkdownOptions, type MarkdownTheme } from "./components/markdown.ts";
 export { MouseRegion, type MouseRegionHandler } from "./components/mouse-region.ts";
+export { ScrollAnchorContainer } from "./components/scroll-anchor-container.ts";
 export {
 	ScrollView,
+	type ScrollViewAnchor,
 	type ScrollViewOptions,
 	type ScrollViewScrollbar,
 	type ScrollViewScrollToOptions,
