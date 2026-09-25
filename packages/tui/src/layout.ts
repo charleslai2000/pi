@@ -1,6 +1,6 @@
 import type { ScrollView } from "./components/scroll-view.ts";
 import { allocateStackSizes, visibleStackEntries } from "./components/stack.ts";
-import { getLayoutNode } from "./layout-node.ts";
+import { getLayoutNode, type VirtualLayoutGeometry } from "./layout-node.ts";
 import { cropKittyImageLine, getKittyImageMetadata, isImageLine } from "./terminal-image.ts";
 import { type Component, Container, CURSOR_MARKER, compositeTuiLine } from "./tui.ts";
 import {
@@ -107,6 +107,33 @@ function isBaseContainerRender(component: Component): boolean {
 	return component.render.toString() === Container.prototype.render.toString();
 }
 
+function layoutVirtualContent(
+	context: LayoutContext,
+	component: Component,
+	rows: readonly VirtualLayoutGeometry[],
+	x: number,
+	y: number,
+	width: number,
+	clip: LayoutRect,
+	extent: number,
+): LayoutBox {
+	const children = rows.map((row) => {
+		const child = layoutComponent(context, row.component, x, y + row.top, width, row.height, clip);
+		child.rect.y = y + row.top;
+		return child;
+	});
+	const box: LayoutBox = {
+		component,
+		rect: { x, y, width, height: extent },
+		clip: intersect(clip, { x, y, width, height: extent }),
+		children,
+		layer: 0,
+	};
+	for (const child of children) child.parent = box;
+	updateClips(box, clip);
+	return box;
+}
+
 function layoutComponent(
 	context: LayoutContext,
 	component: Component,
@@ -173,33 +200,53 @@ function layoutComponent(
 	}
 
 	if (node.type === "scroll") {
-		const previousScrollTop = node.state.scrollTop;
 		const contentWidth = node.state.getContentWidth(safeWidth);
-		const childBox = layoutComponent(
-			context,
-			node.component,
-			x,
-			y - previousScrollTop,
-			contentWidth,
-			undefined,
-			clip,
-		);
-		const contentHeight = childBox.rect.height;
-		const viewportHeight = height === undefined ? contentHeight : Math.max(0, Math.floor(height));
+		const contentNode = getLayoutNode(node.component);
+		const virtualState = contentNode?.type === "virtual" ? contentNode.state : undefined;
+		const previousScrollTop = virtualState?.getScrollOffset() ?? node.state.scrollTop;
+		const viewportHeight = height === undefined ? context.viewport.height : Math.max(0, Math.floor(height));
+		virtualState?.setViewport(viewportHeight, previousScrollTop, virtualState.isFollowingEnd());
+		const virtualRows = virtualState?.layoutWindow({
+			width: contentWidth,
+			viewportHeight,
+			scrollTop: virtualState.getScrollOffset(),
+			overscan: 3,
+		});
+		const childBox =
+			virtualState && virtualRows
+				? layoutVirtualContent(
+						context,
+						node.component,
+						virtualRows,
+						x,
+						y - virtualState.getScrollOffset(),
+						contentWidth,
+						clip,
+						virtualState.getLogicalExtent(),
+					)
+				: layoutComponent(context, node.component, x, y - previousScrollTop, contentWidth, undefined, clip);
+		const contentHeight = virtualState?.getLogicalExtent() ?? childBox.rect.height;
 		const geometry: Array<{ component: Component; key?: string; top: number; height: number }> = [];
-		const collectGeometry = (box: LayoutBox): void => {
-			const contentNode = getLayoutNode(node.component);
-			const key = contentNode?.type === "container" ? contentNode.getAnchorKey(box.component) : undefined;
-			geometry.push({
-				component: box.component,
-				...(key === undefined ? {} : { key }),
-				top: box.rect.y + previousScrollTop,
-				height: box.rect.height,
-			});
-			for (const child of box.children) collectGeometry(child);
-		};
-		collectGeometry(childBox);
-		node.state.updateLayout(contentHeight, viewportHeight, context.requestRender, geometry);
+		if (virtualRows) {
+			for (const row of virtualRows)
+				geometry.push({ component: row.component, key: row.key, top: row.top, height: row.height });
+		} else {
+			const collectGeometry = (box: LayoutBox): void => {
+				const key = contentNode?.type === "container" ? contentNode.getAnchorKey(box.component) : undefined;
+				geometry.push({
+					component: box.component,
+					...(key === undefined ? {} : { key }),
+					top: box.rect.y + previousScrollTop,
+					height: box.rect.height,
+				});
+				for (const child of box.children) collectGeometry(child);
+			};
+			collectGeometry(childBox);
+		}
+		if (virtualState) {
+			node.state.updateVirtualLayout?.(contentHeight, viewportHeight, context.requestRender);
+			virtualState.setViewport(viewportHeight, node.state.scrollTop, virtualState.isFollowingEnd());
+		} else node.state.updateLayout(contentHeight, viewportHeight, context.requestRender, geometry);
 		translateBox(childBox, previousScrollTop - node.state.scrollTop);
 		const scrollView = node.state as ScrollView;
 		if (node.state.primary || !context.primaryScrollView) context.primaryScrollView = scrollView;
@@ -211,7 +258,7 @@ function layoutComponent(
 			clip: childClip,
 			children: [childBox],
 			scrollView,
-			scrollContentLines: renderCached(context, node.component, contentWidth),
+			scrollContentLines: virtualState ? undefined : renderCached(context, node.component, contentWidth),
 			layer: 0,
 		};
 		childBox.parent = box;
@@ -219,6 +266,7 @@ function layoutComponent(
 		return box;
 	}
 
+	if (node.type !== "vstack" && node.type !== "hstack") throw new Error(`Unsupported layout node: ${node.type}`);
 	const entries = visibleStackEntries(node.entries, context.viewport);
 	const gapTotal = Math.max(0, entries.length - 1) * node.gap;
 	if (node.type === "vstack") {

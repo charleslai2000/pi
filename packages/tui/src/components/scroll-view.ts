@@ -1,4 +1,4 @@
-import { LAYOUT_NODE, type ScrollLayoutGeometry, type ScrollLayoutNode } from "../layout-node.ts";
+import { getLayoutNode, LAYOUT_NODE, type ScrollLayoutGeometry, type ScrollLayoutNode } from "../layout-node.ts";
 import { type Component, Container } from "../tui.ts";
 import { ScrollAnchorContainer } from "./scroll-anchor-container.ts";
 
@@ -93,8 +93,55 @@ export class ScrollView extends Container {
 		this.requestRenderCallback?.();
 	}
 
+	findAndScrollVirtualMatch(
+		query: string,
+		fromKey: string | undefined,
+		direction: -1 | 1,
+		align: "start" | "center" | "end" = "center",
+	): string | undefined {
+		const node = getLayoutNode(this.child);
+		if (node?.type !== "virtual") return undefined;
+		const key = node.state.findMatchingKey(query, fromKey, direction);
+		if (key === undefined || !this.scrollToVirtualKey(key, align)) return undefined;
+		return key;
+	}
+
+	scrollToVirtualKey(key: string, align: "start" | "center" | "end" = "start"): boolean {
+		const node = getLayoutNode(this.child);
+		if (node?.type !== "virtual") return false;
+		const index = node.state.findKey(key);
+		if (index === undefined) return false;
+		const offset = node.state.scrollToIndex(index, align, this.currentViewportHeight);
+		this.currentScrollTop = offset;
+		node.state.onScrollOffsetChanged?.(offset);
+		this.followingEnd = false;
+		this.followSuppressedAtEnd = false;
+		this.requestRenderCallback?.();
+		return true;
+	}
+
 	getContentWidth(width: number): number {
 		return this.scrollbar === "always" && width > 1 ? width - 1 : width;
+	}
+
+	updateVirtualLayout(contentHeight: number, viewportHeight: number, requestRender: () => void): void {
+		this.contentHeight = Math.max(0, Math.floor(contentHeight));
+		this.currentViewportHeight = Math.max(0, Math.floor(viewportHeight));
+		this.requestRenderCallback = requestRender;
+		const max = Math.max(0, this.contentHeight - this.currentViewportHeight);
+		const node = getLayoutNode(this.child);
+		if (node?.type !== "virtual") return;
+		this.currentScrollTop = this.followingEnd ? max : Math.max(0, Math.min(node.state.getScrollOffset(), max));
+		node.state.setViewport(this.currentViewportHeight, this.currentScrollTop, this.followingEnd);
+	}
+
+	updateVirtualExtent(contentHeight: number, viewportHeight: number, requestRender: () => void): void {
+		this.updateLayout(contentHeight, viewportHeight, requestRender, []);
+	}
+
+	private stateVirtualPosition(scrollTop: number, _followingEnd: boolean): void {
+		const node = getLayoutNode(this.child);
+		if (node?.type === "virtual") node.state.onScrollOffsetChanged?.(scrollTop);
 	}
 
 	private markScrollbarActivity(): void {
@@ -134,10 +181,13 @@ export class ScrollView extends Container {
 		const next = Math.max(0, Math.min(maxScrollTop, requested));
 		const suppress = options.disableFollow === true && next === maxScrollTop;
 		const following = !suppress && this.followEnd && next === maxScrollTop;
+		const virtualNode = getLayoutNode(this.child);
+		if (virtualNode?.type === "virtual") virtualNode.state.setViewport(this.currentViewportHeight, next, following);
 		if (next === this.currentScrollTop && following === this.followingEnd && suppress === this.followSuppressedAtEnd)
 			return;
 		const moved = next !== this.currentScrollTop;
 		this.currentScrollTop = next;
+		this.stateVirtualPosition(next, following);
 		this.followingEnd = following;
 		this.followSuppressedAtEnd = suppress;
 		if (moved) this.markScrollbarActivity();
@@ -148,11 +198,18 @@ export class ScrollView extends Container {
 		const requested = Number.isFinite(lines) ? Math.trunc(lines) : 0;
 		if (requested === 0) return 0;
 		const maxScrollTop = Math.max(0, this.contentHeight - this.currentViewportHeight);
-		const start = this.followingEnd ? maxScrollTop : this.currentScrollTop;
+		const virtualNode = getLayoutNode(this.child);
+		const start = this.followingEnd
+			? maxScrollTop
+			: virtualNode?.type === "virtual"
+				? virtualNode.state.getScrollOffset()
+				: this.currentScrollTop;
 		const next = Math.max(0, Math.min(maxScrollTop, start + requested));
 		const moved = next - start;
 		const wasFollowing = this.followingEnd;
 		this.currentScrollTop = next;
+		const positionNode = getLayoutNode(this.child);
+		if (positionNode?.type === "virtual") positionNode.state.setScrollTop(next);
 		this.followingEnd = this.followEnd && next === maxScrollTop;
 		this.followSuppressedAtEnd = false;
 		if (moved !== 0) this.markScrollbarActivity();
@@ -165,6 +222,8 @@ export class ScrollView extends Container {
 			this.currentScrollTop !== 0 ||
 			this.followingEnd !== (this.followEnd && this.contentHeight <= this.currentViewportHeight);
 		this.currentScrollTop = 0;
+		const virtualNode = getLayoutNode(this.child);
+		if (virtualNode?.type === "virtual") virtualNode.state.setScrollTop(0);
 		this.followingEnd = this.followEnd && this.contentHeight <= this.currentViewportHeight;
 		this.followSuppressedAtEnd = false;
 		if (changed) {
@@ -177,6 +236,8 @@ export class ScrollView extends Container {
 		const next = Math.max(0, this.contentHeight - this.currentViewportHeight);
 		const changed = this.currentScrollTop !== next || this.followingEnd !== this.followEnd;
 		this.currentScrollTop = next;
+		const virtualNode = getLayoutNode(this.child);
+		if (virtualNode?.type === "virtual") virtualNode.state.setScrollTop(next);
 		this.followingEnd = this.followEnd;
 		this.followSuppressedAtEnd = false;
 		if (changed) {
@@ -230,6 +291,11 @@ export class ScrollView extends Container {
 		this.currentViewportHeight = Math.max(0, Math.floor(viewportHeight));
 		this.requestRenderCallback = requestRender;
 		this.contentGeometry = [...geometry];
+		const virtualNode = getLayoutNode(this.child);
+		if (virtualNode?.type === "virtual") {
+			this.updateVirtualLayout(this.contentHeight, this.currentViewportHeight, requestRender);
+			return;
+		}
 		const maxScrollTop = Math.max(0, this.contentHeight - this.currentViewportHeight);
 		if (this.pendingAnchor) {
 			const anchor = this.pendingAnchor;
@@ -265,6 +331,8 @@ export class ScrollView extends Container {
 		throw new Error("ScrollView child cannot be cleared");
 	}
 	override render(width: number): string[] {
+		const node = getLayoutNode(this.child);
+		if (node?.type === "virtual") return [];
 		const contentWidth = this.getContentWidth(width);
 		const lines = this.child.render(contentWidth);
 		return contentWidth === width ? lines : lines.map((line) => `${line} `);

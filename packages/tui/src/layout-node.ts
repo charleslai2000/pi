@@ -24,6 +24,54 @@ export interface StackLayoutNode {
 	align: "stretch" | "start" | "center" | "end";
 }
 
+/** A materialized item's measured placement in virtual content coordinates. */
+export interface VirtualLayoutGeometry {
+	component: Component;
+	key: string;
+	index: number;
+	top: number;
+	height: number;
+}
+
+export interface VirtualLayoutRange {
+	start: number;
+	end: number;
+}
+
+export interface VirtualLayoutContext {
+	width: number;
+	viewportHeight: number;
+	scrollTop: number;
+	overscan: number;
+}
+
+/**
+ * Logical data and item rendering remain caller-owned. The layout node owns
+ * logical extent, materialization, measurements and virtual-coordinate mapping.
+ * layoutWindow measures materialized items and returns their final geometry.
+ */
+export interface VirtualLayoutState {
+	readonly logicalCount: number;
+	getLogicalExtent(): number;
+	getScrollOffset(): number;
+	isFollowingEnd(): boolean;
+	layoutWindow(context: VirtualLayoutContext): readonly VirtualLayoutGeometry[];
+	findKey(key: string): number | undefined;
+	findMatchingKey(query: string, fromKey: string | undefined, direction: -1 | 1): string | undefined;
+	getKey(index: number): string;
+	getMaterializedRange(): VirtualLayoutRange;
+	setViewport(viewportHeight: number, scrollTop: number, followingEnd: boolean): void;
+	setScrollTop(scrollTop: number): void;
+	getLayoutVersion(): number;
+	scrollToIndex(index: number, align: "start" | "center" | "end", viewportHeight: number): number;
+	onScrollOffsetChanged?(scrollTop: number): void;
+}
+
+export interface VirtualLayoutNode {
+	type: "virtual";
+	state: VirtualLayoutState;
+}
+
 export interface ScrollLayoutGeometry {
 	component: Component;
 	key?: string;
@@ -44,6 +92,7 @@ export interface ScrollLayoutState {
 		requestRender: () => void,
 		geometry?: readonly ScrollLayoutGeometry[],
 	): void;
+	updateVirtualLayout?(contentHeight: number, viewportHeight: number, requestRender: () => void): void;
 }
 
 export interface ContainerLayoutNode {
@@ -58,7 +107,7 @@ export interface ScrollLayoutNode {
 	state: ScrollLayoutState;
 }
 
-export type LayoutNode = StackLayoutNode | ScrollLayoutNode | ContainerLayoutNode;
+export type LayoutNode = StackLayoutNode | ScrollLayoutNode | ContainerLayoutNode | VirtualLayoutNode;
 
 export interface LayoutComponent extends Component {
 	[LAYOUT_NODE](): LayoutNode;

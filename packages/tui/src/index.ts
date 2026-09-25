@@ -45,6 +45,14 @@ export {
 	type StackOptions,
 	VStack,
 } from "./components/v-stack.ts";
+export {
+	VirtualList,
+	type VirtualListCallbacks,
+	type VirtualListData,
+	type VirtualListMutation,
+	type VirtualListOptions,
+	type VirtualListPosition,
+} from "./components/virtual-list.ts";
 // Editor component interface (for custom editors)
 export type { EditorComponent } from "./editor-component.ts";
 // Fuzzy matching

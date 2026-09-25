@@ -576,6 +576,37 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		const scrollView = layout.primaryScrollView ?? this.implicitScrollView;
 		const box = getScrollViewBox(layout, scrollView);
 		const lines = box?.scrollContentLines;
+		const virtualNode = getLayoutNode(scrollView);
+		if (!lines && virtualNode?.type === "scroll") {
+			const contentNode = getLayoutNode(virtualNode.component);
+			if (
+				contentNode?.type === "virtual" &&
+				contentNode.state.findMatchingKey(search.query, undefined, 1) !== undefined
+			) {
+				if (!search.query.trim()) {
+					search.matches = [];
+					search.selectedIndex = -1;
+					search.selectedKey = undefined;
+					search.component.setResult(-1, 0);
+					return false;
+				}
+				const from = search.matches[search.selectedIndex]?.segments[0]?.row;
+				const key = contentNode.state.getKey(
+					Math.max(0, Math.min(contentNode.state.logicalCount - 1, from ?? scrollView.scrollTop)),
+				);
+				const direction = search.selectionMode === "previous" ? -1 : 1;
+				const matchKey = contentNode.state.findMatchingKey(search.query, key, direction);
+				if (!matchKey || !scrollView.scrollToVirtualKey(matchKey, "center")) {
+					search.component.setResult(-1, 0);
+					search.selectionMode = "retain";
+					return false;
+				}
+				search.selectedKey = matchKey;
+				search.selectionMode = "retain";
+				search.component.setResult(0, 1);
+				return true;
+			}
+		}
 		if (!lines || !search.query.trim()) {
 			search.matches = [];
 			search.selectedIndex = -1;
