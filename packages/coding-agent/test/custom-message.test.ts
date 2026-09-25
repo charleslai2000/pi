@@ -2,6 +2,7 @@ import { Text } from "@earendil-works/pi-tui";
 import { describe, expect, test } from "vitest";
 import type { MessageRenderer, MessageRenderOptions } from "../src/core/extensions/types.ts";
 import type { CustomMessage } from "../src/core/messages.ts";
+import { controlEventRenderer } from "../src/modes/interactive/components/control-presentation.ts";
 import { CustomMessageComponent } from "../src/modes/interactive/components/custom-message.ts";
 import { initTheme } from "../src/modes/interactive/theme/theme.ts";
 import { stripAnsi } from "../src/utils/ansi.ts";
@@ -40,5 +41,32 @@ describe("CustomMessageComponent", () => {
 				.map(stripAnsi)
 				.some((line) => line.startsWith("custom")),
 		).toBe(true);
+	});
+
+	test("control events keep compact content and reveal exact content/details when expanded", () => {
+		initTheme("dark");
+		const content = "Task goal-a/T001 blocked";
+		const details = { factKey: "goal-a/T001:blocked", source: "lifecycle" };
+		const component = new CustomMessageComponent(
+			{
+				role: "custom",
+				customType: "control_event",
+				content,
+				details,
+				display: true,
+				timestamp: Date.now(),
+			},
+			controlEventRenderer,
+		);
+		const collapsed = stripAnsi(component.render(100).join("\n"));
+		expect(collapsed).toContain("[control_event]");
+		expect(collapsed).toContain(content);
+		expect(collapsed).not.toContain("factKey");
+		component.setExpanded(true);
+		const expanded = stripAnsi(component.render(100).join("\n"));
+		expect(expanded).toContain(content);
+		expect(expanded).toContain("content:");
+		expect(expanded).toContain('"factKey": "goal-a/T001:blocked"');
+		expect(expanded).toContain('"source": "lifecycle"');
 	});
 });

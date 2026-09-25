@@ -139,6 +139,7 @@ import { AssistantMessageComponent } from "./components/assistant-message.ts";
 import { BashExecutionComponent } from "./components/bash-execution.ts";
 import { BranchSummaryMessageComponent } from "./components/branch-summary-message.ts";
 import { CompactionSummaryMessageComponent } from "./components/compaction-summary-message.ts";
+import { controlEventRenderer, createControlToolRenderers } from "./components/control-presentation.ts";
 import { CustomEditor } from "./components/custom-editor.ts";
 import { CustomEntryComponent } from "./components/custom-entry.ts";
 import { CustomMessageComponent } from "./components/custom-message.ts";
@@ -2138,7 +2139,9 @@ export class InteractiveMode {
 	 * whatever this returns, so they never reach into the tool registry themselves.
 	 */
 	private getRegisteredToolDefinition(toolName: string) {
-		return withBuiltInRenderers(toolName, this.session.getToolDefinition(toolName));
+		const definition = withBuiltInRenderers(toolName, this.session.getToolDefinition(toolName));
+		const controlRenderer = createControlToolRenderers(toolName);
+		return controlRenderer ? { ...definition, ...controlRenderer } : definition;
 	}
 
 	private getMarkdownTransformers(): MarkdownTransformer[] {
@@ -3786,7 +3789,9 @@ export class InteractiveMode {
 			}
 			case "custom": {
 				if (message.display) {
-					const renderer = this.session.extensionRunner.getMessageRenderer(message.customType);
+					const renderer =
+						this.session.extensionRunner.getMessageRenderer(message.customType) ??
+						(message.customType === "control_event" ? controlEventRenderer : undefined);
 					const component = new CustomMessageComponent(
 						message,
 						renderer,

@@ -13,6 +13,7 @@ import { type BashOperations, createBashToolDefinition } from "../src/core/tools
 import { createReadTool, createReadToolDefinition } from "../src/core/tools/read.ts";
 import { withBuiltInRenderers } from "../src/core/tools/renderers/index.ts";
 import { createWriteToolDefinition } from "../src/core/tools/write.ts";
+import { createControlToolRenderers } from "../src/modes/interactive/components/control-presentation.ts";
 import { ToolExecutionComponent } from "../src/modes/interactive/components/tool-execution.ts";
 import { initTheme, theme } from "../src/modes/interactive/theme/theme.ts";
 import { stripAnsi } from "../src/utils/ansi.ts";
@@ -430,6 +431,74 @@ describe("ToolExecutionComponent parity", () => {
 		component.updateResult({ content: [{ type: "text", text: "done" }], details: {}, isError: false }, false);
 		const rendered = stripAnsi(component.render(120).join("\n"));
 		expect(rendered).toContain("arg:bar");
+	});
+
+	test("projects control inspection results while preserving exact content and details in expanded view", () => {
+		const original = JSON.stringify({
+			task: { goalId: "goal-a", taskId: "T001", status: "READY", objective: "Implement the feature" },
+			assignment: undefined,
+		});
+		const details = { opaque: [1, "two"] };
+		const definition = { name: "inspect_task", ...createControlToolRenderers("inspect_task") };
+		const component = new ToolExecutionComponent(
+			"inspect_task",
+			"control-inspect",
+			{ goalId: "goal-a", taskId: "T001" },
+			{},
+			definition as ToolDefinition,
+			createFakeTui(),
+			process.cwd(),
+		);
+		component.updateResult({ content: [{ type: "text", text: original }], details, isError: false });
+		const collapsed = stripAnsi(component.render(120).join("\n"));
+		expect(collapsed).toContain("goal-a/T001");
+		expect(collapsed).toContain("Implement the feature");
+		expect(collapsed).not.toContain('"objective"');
+		component.setExpanded(true);
+		const expanded = stripAnsi(component.render(120).join("\n"));
+		expect(expanded).toContain('"text": "{\\"task\\":{\\"goalId\\":\\"goal-a\\"');
+		expect(expanded).toContain('"type": "text"');
+		expect(expanded).toContain('"opaque": [');
+		expect(expanded).toContain('"two"');
+	});
+
+	test("control mutation, errors, and unknown inspection payloads retain readable safe output", () => {
+		const mutation = new ToolExecutionComponent(
+			"create_task",
+			"control-create",
+			{},
+			{},
+			createControlToolRenderers("create_task") as never,
+			createFakeTui(),
+			process.cwd(),
+		);
+		mutation.updateResult({ content: [{ type: "text", text: "Created goal-a/T002" }], isError: false });
+		expect(stripAnsi(mutation.render(120).join("\n"))).toContain("Created goal-a/T002");
+		const error = new ToolExecutionComponent(
+			"dispatch_task",
+			"control-error",
+			{},
+			{},
+			createControlToolRenderers("dispatch_task") as never,
+			createFakeTui(),
+			process.cwd(),
+		);
+		error.updateResult({
+			content: [{ type: "text", text: "Task prerequisites are not satisfied: goal-a/T002" }],
+			isError: true,
+		});
+		expect(stripAnsi(error.render(120).join("\n"))).toContain("Task prerequisites are not satisfied: goal-a/T002");
+		const unknown = new ToolExecutionComponent(
+			"inspect_task",
+			"control-unknown",
+			{},
+			{},
+			createControlToolRenderers("inspect_task") as never,
+			createFakeTui(),
+			process.cwd(),
+		);
+		unknown.updateResult({ content: [{ type: "text", text: "not-json future payload" }], isError: false });
+		expect(stripAnsi(unknown.render(120).join("\n"))).toContain("not-json future payload");
 	});
 
 	test("collapses fallback results until expanded", () => {
