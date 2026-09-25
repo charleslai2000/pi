@@ -173,7 +173,7 @@ export class FooterComponent implements Component {
 		let statsLeft = statsParts.join(" ");
 
 		// Add model name on the right side, plus thinking level if model supports it
-		const modelName = state.model?.id || "no-model";
+		const modelName = this.session.model?.id || "no-model";
 
 		let statsLeftWidth = visibleWidth(statsLeft);
 
@@ -188,8 +188,8 @@ export class FooterComponent implements Component {
 
 		// Add thinking level indicator if model supports reasoning
 		let rightSideWithoutProvider = modelName;
-		if (state.model?.reasoning) {
-			const thinkingLevel = state.thinkingLevel || "off";
+		if (this.session.model?.reasoning) {
+			const thinkingLevel = this.session.thinkingLevel || "off";
 			rightSideWithoutProvider =
 				thinkingLevel === "off" ? `${modelName} • thinking off` : `${modelName} • ${thinkingLevel}`;
 		}

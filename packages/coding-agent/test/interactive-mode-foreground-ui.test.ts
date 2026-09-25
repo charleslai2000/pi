@@ -153,9 +153,9 @@ describe("InteractiveMode foreground extension UI lifetime", () => {
 		await submit!("/sessions");
 		expect(liveSelector).toBeDefined();
 		const selectorText = liveSelector!.render(160).join("\n");
-		expect(selectorText).toContain(cwdA);
-		expect(selectorText).toContain(cwdB);
-		expect(selectorText).toContain(cwdC);
+		expect(selectorText).toContain("control");
+		expect(selectorText).toContain("design");
+		expect(selectorText).toContain("experiments");
 
 		await runtimeHost.switchForeground(slotA.id);
 		expect(runtimeHost.session).toBe(slotA.session);

@@ -64,6 +64,12 @@ function createSession(options: {
 	}
 
 	const session = {
+		get model() {
+			return this.state.model;
+		},
+		get thinkingLevel() {
+			return this.state.thinkingLevel;
+		},
 		state: {
 			model: {
 				id: options.modelId ?? "test-model",
@@ -152,6 +158,32 @@ describe("FooterComponent width handling", () => {
 			expect(visibleWidth(line)).toBeLessThanOrEqual(width);
 		}
 		expect(stripAnsi(lines[2]!)).toContain("sessions 2 active · 1 blocked");
+	});
+
+	it("projects the currently bound Session's effective model and variant", () => {
+		const controller = createSession({
+			sessionName: "controller",
+			modelId: "lead",
+			reasoning: true,
+			thinkingLevel: "high",
+		});
+		const execution = createSession({
+			sessionName: "debugger-deep",
+			modelId: "qwen-controller",
+			reasoning: true,
+			thinkingLevel: "medium",
+		});
+		const footer = new FooterComponent(controller, createFooterData(1));
+		const controllerLines = footer.render(120).join("\n");
+		expect(stripAnsi(controllerLines)).toContain("lead • high");
+		footer.setSession(execution);
+		const executionLines = footer.render(120).join("\n");
+		expect(stripAnsi(executionLines)).toContain("qwen-controller • medium");
+		expect(stripAnsi(executionLines)).not.toContain("lead • high");
+
+		execution.state.model!.id = "runtime-selected";
+		execution.state.thinkingLevel = "low";
+		expect(stripAnsi(footer.render(120).join("\n"))).toContain("runtime-selected • low");
 	});
 
 	it("includes summary and tool result usage in the total cost", () => {

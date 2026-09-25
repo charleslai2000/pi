@@ -167,6 +167,7 @@ export type AgentSessionEvent =
 	| { type: "entry_appended"; entry: SessionEntry }
 	| { type: "session_info_changed"; name: string | undefined }
 	| { type: "thinking_level_changed"; level: ThinkingLevel }
+	| { type: "model_changed"; model: Model<any> }
 	| {
 			type: "compaction_end";
 			reason: "manual" | "threshold" | "overflow";
@@ -1874,6 +1875,7 @@ export class AgentSession {
 		const thinkingLevel = this._getThinkingLevelForModelSwitch(model);
 		this.agent.state.model = model;
 		this.sessionManager.appendModelChange(model.provider, model.id);
+		this._emit({ type: "model_changed", model });
 		if (options.persist) {
 			this.settingsManager.setDefaultModelAndProvider(model.provider, model.id);
 			this._addPersistedDefaultToNonEmptyScope(model);
@@ -1941,6 +1943,7 @@ export class AgentSession {
 		// Apply model
 		this.agent.state.model = next.model;
 		this.sessionManager.appendModelChange(next.model.provider, next.model.id);
+		this._emit({ type: "model_changed", model: next.model });
 		if (options.persist) {
 			this.settingsManager.setDefaultModelAndProvider(next.model.provider, next.model.id);
 			this._addPersistedDefaultToNonEmptyScope(next.model);
@@ -1976,6 +1979,7 @@ export class AgentSession {
 		const thinkingLevel = this._getThinkingLevelForModelSwitch(nextModel);
 		this.agent.state.model = nextModel;
 		this.sessionManager.appendModelChange(nextModel.provider, nextModel.id);
+		this._emit({ type: "model_changed", model: nextModel });
 		if (options.persist) {
 			this.settingsManager.setDefaultModelAndProvider(nextModel.provider, nextModel.id);
 			this._addPersistedDefaultToNonEmptyScope(nextModel);

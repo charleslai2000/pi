@@ -47,6 +47,31 @@ describe("Pi Agent profiles", () => {
 		});
 	});
 
+	it("uses only the selected project profile fields and supports model-only/variant-only/empty profiles", () => {
+		const root = workspace();
+		const home = join(root, "home");
+		mkdirSync(join(home, ".pi", "agents"), { recursive: true });
+		writeFileSync(
+			join(home, ".pi", "agents", "model-only.md"),
+			"---\nmodel: faux/global\nvariant: high\n---\nGlobal.\n",
+		);
+		writeFileSync(join(root, ".pi", "agents", "model-only.md"), "---\nmodel: faux/project\n---\nProject.\n");
+		writeFileSync(join(root, ".pi", "agents", "variant-only.md"), "---\nvariant: medium\n---\nVariant.\n");
+		writeFileSync(join(root, ".pi", "agents", "plain.md"), "Plain prompt.\n");
+		expect(resolveAgentProfile("model-only", { piRoot: root, homeDir: home })).toMatchObject({
+			model: "faux/project",
+			variant: undefined,
+		});
+		expect(resolveAgentProfile("variant-only", { piRoot: root, homeDir: home })).toMatchObject({
+			model: undefined,
+			variant: "medium",
+		});
+		expect(resolveAgentProfile("plain", { piRoot: root, homeDir: home })).toMatchObject({
+			model: undefined,
+			variant: undefined,
+		});
+	});
+
 	it("merges global and project profiles with project source/description metadata", () => {
 		const root = workspace();
 		const home = join(root, "home");
@@ -171,6 +196,89 @@ describe("Pi Agent profiles", () => {
 		);
 		expect(prompt).toContain("fresh memory");
 		await result.session.dispose();
+		faux.unregister();
+	});
+
+	it("applies model-only and variant-only overrides through Session creation, preserving omitted defaults", async () => {
+		const root = workspace();
+		const taskDir = join(root, ".pi", "goal");
+		mkdirSync(taskDir, { recursive: true });
+		writeFileSync(join(taskDir, "goal.md"), "# Goal\nStatus: READY\n");
+		writeFileSync(join(taskDir, "T001-work.md"), "Status: READY\nObjective: do it\nCompletion: done\n");
+		const faux = registerFauxProvider({ models: [{ id: "model", name: "Faux", reasoning: true }] });
+		const auth = AuthStorage.inMemory();
+		await auth.modify("faux", async () => ({ type: "api_key", key: "test" }));
+		const modelRuntime = await ModelRuntime.create({ credentials: auth, modelsPath: null, allowModelNetwork: false });
+		const model = faux.getModel();
+		modelRuntime.registerProvider("faux", {
+			baseUrl: model.baseUrl,
+			api: model.api,
+			models: [
+				{
+					...model,
+					reasoning: true,
+					thinkingLevelMap: { minimal: "minimal", low: "low", medium: "medium", high: "high" },
+				},
+			],
+		});
+		const source = SessionManager.create(root, join(root, ".pi", "sessions"));
+		source.persistSessionHeader();
+		setPiRoot(root);
+		const registry = new SessionRegistry(root);
+		setSessionRegistryForTesting(registry);
+		const createRuntime = async ({
+			cwd,
+			agentDir,
+			sessionManager,
+		}: {
+			cwd: string;
+			agentDir: string;
+			sessionManager: SessionManager;
+		}) => {
+			const services = await createAgentSessionServices({
+				cwd,
+				agentDir,
+				modelRuntime,
+				resourceLoaderOptions: { noSkills: true, noPromptTemplates: true, noThemes: true },
+			});
+			const created = await createAgentSessionFromServices({
+				services,
+				sessionManager,
+				model,
+				thinkingLevel: "low",
+			});
+			return { ...created, services, diagnostics: [] };
+		};
+		const fork = async (slug: string) =>
+			forkExecutionSession({
+				request: { task: { goalId: "goal", taskId: "T001" }, agentSlug: slug },
+				piRoot: root,
+				sourceSessionFile: source.getSessionFile()!,
+				agentDir: join(root, "agent"),
+				modelRuntime,
+				createRuntime: createRuntime as never,
+			});
+		writeFileSync(
+			join(root, ".pi", "agents", "model-only.md"),
+			"---\nmodel: faux/model\nvariant: high\n---\nModel only.\n",
+		);
+		writeFileSync(join(root, ".pi", "agents", "variant-only.md"), "---\nvariant: high\n---\nVariant only.\n");
+		writeFileSync(join(root, ".pi", "agents", "plain.md"), "Plain.\n");
+		writeFileSync(join(root, ".pi", "agents", "invalid.md"), "---\nvariant: turbo\n---\nInvalid.\n");
+		const modelOnly = await fork("model-only");
+		const variantOnly = await fork("variant-only");
+		const plain = await fork("plain");
+		expect(modelOnly.session.model).toMatchObject({ provider: "faux", id: "model" });
+		expect(modelOnly.session.thinkingLevel).toBe("high");
+		expect(SessionManager.open(modelOnly.session.sessionFile!).buildSessionContext().model).toEqual({
+			provider: "faux",
+			modelId: "model",
+		});
+		expect(variantOnly.session.thinkingLevel).toBe("high");
+		expect(plain.session.thinkingLevel).toBe("low");
+		expect(SessionManager.open(variantOnly.session.sessionFile!).buildSessionContext().thinkingLevel).toBe("high");
+		await expect(fork("invalid")).rejects.toThrow(/Unsupported profile variant: turbo/);
+		await Promise.all([modelOnly.session.dispose(), variantOnly.session.dispose(), plain.session.dispose()]);
 		faux.unregister();
 	});
 

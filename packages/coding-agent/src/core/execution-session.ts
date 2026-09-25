@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
+import { isValidThinkingLevel } from "../cli/args.ts";
 import type { AgentProfile } from "./agent-profiles.ts";
 import { AgentProfileError, resolveAgentProfile } from "./agent-profiles.ts";
 import type { AgentSession } from "./agent-session.ts";
@@ -7,7 +8,7 @@ import type { CreateAgentSessionRuntimeFactory } from "./agent-session-runtime.t
 import type { AgentSessionServices } from "./agent-session-services.ts";
 import { createAgentSessionFromServices, createAgentSessionServices } from "./agent-session-services.ts";
 import { readGoal, readTask } from "./control/read-model.ts";
-import { findExactModelReferenceMatch } from "./model-resolver.ts";
+import { resolveCliModel } from "./model-resolver.ts";
 import type { ModelRuntime } from "./model-runtime.ts";
 import { assertCwdInsidePiRoot } from "./pi-root.ts";
 import { SessionManager } from "./session-manager.ts";
@@ -25,11 +26,20 @@ export interface ExecutionSessionResult {
 	profileSlug?: string;
 }
 
-function resolveVariant(value: string | undefined): ThinkingLevel | undefined {
-	if (value === undefined) return undefined;
-	if (!["off", "minimal", "low", "medium", "high", "xhigh", "max"].includes(value))
-		throw new AgentProfileError(`Unsupported profile variant: ${value}`);
-	return value as ThinkingLevel;
+function resolveProfileConfiguration(
+	profile: AgentProfile | undefined,
+	modelRuntime: ModelRuntime,
+): { model?: ReturnType<typeof resolveCliModel>["model"]; variant?: ThinkingLevel } {
+	const variant = profile?.variant;
+	if (variant !== undefined && !isValidThinkingLevel(variant))
+		throw new AgentProfileError(`Unsupported profile variant: ${variant}`);
+	if (profile?.model === undefined) return { variant: variant as ThinkingLevel | undefined };
+	const resolved = resolveCliModel({ cliModel: profile.model, modelRuntime });
+	if (resolved.error || !resolved.model)
+		throw new AgentProfileError(
+			`Profile model '${profile.model}' cannot be resolved: ${resolved.error ?? "no match"}`,
+		);
+	return { model: resolved.model, variant: (variant as ThinkingLevel | undefined) ?? resolved.thinkingLevel };
 }
 
 export function buildExecutionTaskContext(root: string, goalId: string, taskId: string): string {
@@ -74,30 +84,30 @@ export async function forkExecutionSession(options: {
 			extensionsResult: runtime.extensionsResult,
 			modelFallbackMessage: runtime.modelFallbackMessage,
 		};
-		const variant = resolveVariant(profile?.variant);
-		if (profile?.model) {
-			const model = findExactModelReferenceMatch(profile.model, [...services.modelRuntime.getModels()]);
-			if (!model) throw new AgentProfileError(`Profile model cannot be resolved: ${profile.model}`);
-			created.session.agent.state.model = model;
-			created.session.sessionManager.appendModelChange(model.provider, model.id);
-			if (variant) created.session.setThinkingLevel(variant, { persist: false });
-		} else if (variant) created.session.setThinkingLevel(variant, { persist: false });
+		const configuration = resolveProfileConfiguration(profile, services.modelRuntime);
+		if (configuration.model) {
+			if (created.session.model !== configuration.model) await created.session.setModel(configuration.model);
+			created.session.sessionManager.appendModelChange(configuration.model.provider, configuration.model.id);
+		}
+		if (configuration.variant) {
+			created.session.setThinkingLevel(configuration.variant, { persist: false });
+			created.session.sessionManager.appendThinkingLevelChange(created.session.thinkingLevel);
+		}
 	} else {
 		services = await createAgentSessionServices({
 			cwd,
 			agentDir: options.agentDir,
 			modelRuntime: options.modelRuntime,
 		});
-		const model = profile?.model
-			? findExactModelReferenceMatch(profile.model, [...services.modelRuntime.getModels()])
-			: undefined;
-		if (profile?.model && !model) throw new AgentProfileError(`Profile model cannot be resolved: ${profile.model}`);
+		const configuration = resolveProfileConfiguration(profile, services.modelRuntime);
 		created = await createAgentSessionFromServices({
 			services,
 			sessionManager: manager,
-			model,
+			model: configuration.model,
+			thinkingLevel: configuration.variant,
 		});
-		if (profile?.variant) created.session.setThinkingLevel(resolveVariant(profile.variant)!, { persist: false });
+		if (configuration.model) manager.appendModelChange(configuration.model.provider, configuration.model.id);
+		if (configuration.variant) manager.appendThinkingLevelChange(created.session.thinkingLevel);
 	}
 	created.session.setSessionName(profile?.agentSlug ?? "execution");
 	const taskContext = buildExecutionTaskContext(root, options.request.task.goalId, options.request.task.taskId);

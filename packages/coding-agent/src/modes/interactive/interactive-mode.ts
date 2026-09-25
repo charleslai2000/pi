@@ -2062,6 +2062,8 @@ export class InteractiveMode {
 		}
 
 		await this.updateAvailableProviderCount();
+		this.footer.invalidate();
+		this.ui.requestRender();
 		this.updateEditorBorderColor();
 		this.updateTerminalTitle();
 	}
@@ -3400,7 +3402,9 @@ export class InteractiveMode {
 				break;
 
 			case "thinking_level_changed":
+			case "model_changed":
 				this.footer.invalidate();
+				this.ui.requestRender();
 				this.updateEditorBorderColor();
 				break;
 
