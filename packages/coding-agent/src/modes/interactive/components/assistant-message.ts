@@ -88,6 +88,10 @@ export class AssistantMessageComponent extends Container {
 		return lines;
 	}
 
+	getMessage(): AssistantMessage | undefined {
+		return this.lastMessage;
+	}
+
 	updateContent(message: AssistantMessage, isStreaming = this.isStreaming): void {
 		this.lastMessage = message;
 		this.isStreaming = isStreaming;

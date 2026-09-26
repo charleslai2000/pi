@@ -96,9 +96,11 @@ export class VirtualList implements VirtualLayoutState, Component {
 	private readonly options: Required<VirtualListOptions>;
 	private readonly callbacks: VirtualListCallbacks;
 	private count = 0;
+	private keyIndex = new Map<string, number>();
 	private scrollTop = 0;
 	private viewportHeight = 1;
 	private width = 0;
+	private lastWidth = 0;
 	private followingEnd: boolean;
 	private range: VirtualLayoutRange = { start: 0, end: 0 };
 	private geometry: VirtualLayoutGeometry[] = [];
@@ -117,6 +119,7 @@ export class VirtualList implements VirtualLayoutState, Component {
 		};
 		this.callbacks = callbacks;
 		this.count = Math.max(0, Math.floor(data.getCount()));
+		this.rebuildKeyIndex();
 		this.followingEnd = false;
 		this.followNextEnd = false;
 		this.resetHeights();
@@ -167,11 +170,12 @@ export class VirtualList implements VirtualLayoutState, Component {
 	layoutWindow(context: VirtualLayoutContext): readonly VirtualLayoutGeometry[] {
 		if (this.data.getCount() !== this.count) {
 			this.count = Math.max(0, Math.floor(this.data.getCount()));
+			this.rebuildKeyIndex();
 			this.resetHeights();
 		}
 		const widthChanged = this.width !== 0 && this.width !== context.width;
 		this.width = context.width;
-		if (widthChanged) this.pendingPosition ??= this.capturePosition();
+		if (widthChanged && !this.navigationAnchor) this.pendingPosition ??= this.capturePositionAt(this.scrollTop);
 		this.viewportHeight = Math.max(0, Math.floor(context.viewportHeight));
 		let top =
 			this.followNextEnd || this.followingEnd
@@ -181,6 +185,8 @@ export class VirtualList implements VirtualLayoutState, Component {
 			const anchorIndex = this.findKey(this.navigationAnchor.key);
 			if (anchorIndex !== undefined) top = Math.max(0, this.heights.sum(anchorIndex) - this.navigationAnchor.offset);
 		}
+		if (this.lastWidth > 0 && this.lastWidth !== context.width && !this.navigationAnchor)
+			this.pendingPosition ??= this.capturePositionAt(top);
 		this.followNextEnd = false;
 		const navigation = this.navigation;
 		const preserveAnchor = !navigation ? (this.pendingPosition ?? this.capturePositionAt(top)) : undefined;
@@ -210,6 +216,7 @@ export class VirtualList implements VirtualLayoutState, Component {
 			rows.push({ component, key, index, top: this.heights.sum(index), height });
 		}
 		for (const index of this.materialized.keys()) if (index < start || index >= end) this.materialized.delete(index);
+		const previousRange = this.range;
 		this.range = { start, end };
 		this.layoutVersion++;
 		if (targetIndex !== undefined && rows.some((row) => row.key === navigation?.key)) {
@@ -237,7 +244,8 @@ export class VirtualList implements VirtualLayoutState, Component {
 		} else if (this.followingEnd) top = Math.max(0, this.getLogicalExtent() - this.viewportHeight);
 		this.scrollTop = top;
 		this.geometry = rows;
-		this.callbacks.onRangeChange?.(this.range);
+		this.lastWidth = context.width;
+		if (previousRange.start !== start || previousRange.end !== end) this.callbacks.onRangeChange?.(this.range);
 		if (start === 0) this.callbacks.onStartReached?.(this.range);
 		if (end === this.count) this.callbacks.onEndReached?.(this.range);
 		if (this.pendingPosition?.key) this.navigationAnchor = this.pendingPosition;
@@ -246,14 +254,14 @@ export class VirtualList implements VirtualLayoutState, Component {
 	}
 
 	findKey(key: string): number | undefined {
-		for (let index = 0; index < this.count; index++) if (this.data.getKey(index) === key) return index;
-		return undefined;
+		return this.keyIndex.get(key);
 	}
 	findMatchingKey(query: string, fromKey: string | undefined, direction: -1 | 1): string | undefined {
 		if (!this.data.findMatchingKey) return undefined;
 		const fromIndex = fromKey === undefined ? (direction > 0 ? -1 : this.count) : (this.findKey(fromKey) ?? -1);
 		return this.data.findMatchingKey(query, fromIndex, direction);
 	}
+
 	getKey(index: number): string {
 		return this.data.getKey(index);
 	}
@@ -305,6 +313,7 @@ export class VirtualList implements VirtualLayoutState, Component {
 		const anchorIndex = position.index ?? (position.key === undefined ? undefined : this.findKey(position.key));
 		const anchorHeight = anchorIndex === undefined ? undefined : this.heights.get(anchorIndex);
 		this.count = Math.max(0, this.data.getCount());
+		this.rebuildKeyIndex();
 		if (mutation.type === "replace") {
 			this.measuredHeights.clear();
 			this.materialized.clear();
@@ -313,6 +322,11 @@ export class VirtualList implements VirtualLayoutState, Component {
 			this.followingEnd = false;
 			this.resetHeights();
 			this.scrollTop = 0;
+			this.range = { start: 0, end: 0 };
+			this.geometry = [];
+			this.layoutVersion++;
+			this.materialized.clear();
+			this.callbacks.onRangeChange?.(this.range);
 			return;
 		}
 		const added = mutation.type === "prepend" ? Math.max(0, this.count - oldCount) : 0;
@@ -362,6 +376,10 @@ export class VirtualList implements VirtualLayoutState, Component {
 			offset: top - this.heights.sum(index),
 			followingEnd: this.followingEnd,
 		};
+	}
+	private rebuildKeyIndex(): void {
+		this.keyIndex.clear();
+		for (let index = 0; index < this.count; index++) this.keyIndex.set(this.data.getKey(index), index);
 	}
 	private resetHeights(): void {
 		this.heights.reset(this.count, this.options.estimatedItemHeight);

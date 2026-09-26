@@ -180,6 +180,14 @@ export class ToolExecutionComponent extends Container {
 		});
 	}
 
+	getToolCallId(): string {
+		return this.toolCallId;
+	}
+
+	getToolName(): string {
+		return this.toolName;
+	}
+
 	updateArgs(args: any): void {
 		this.args = args;
 		this.updateDisplay();
