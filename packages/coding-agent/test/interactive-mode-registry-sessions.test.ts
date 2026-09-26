@@ -175,7 +175,7 @@ describe("InteractiveMode Registry session paths", () => {
 		const rows = value.registry.rows();
 		const dbRow = rows.find((row) => row.session_id === "d1");
 		expect(dbRow).toBeDefined();
-		const database = new DatabaseSync(join(value.root, ".pi", "control.sqlite3"));
+		const database = new DatabaseSync(join(value.root, ".pi", "control", "control.sqlite3"));
 		database.prepare("UPDATE sessions SET session_file=NULL WHERE session_id='d1'").run();
 		database.close();
 		const selectorLoader = () => {

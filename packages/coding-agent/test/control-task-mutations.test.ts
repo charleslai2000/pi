@@ -14,9 +14,9 @@ import { setPiRoot } from "../src/core/pi-root.ts";
 
 function fixture(status = "ACTIVE"): { root: string; taskPath: string } {
 	const root = mkdtempSync(join("/tmp", "pi-task-mutation-"));
-	const taskPath = join(root, ".pi", "goal-a", "T001-work.md");
-	mkdirSync(join(root, ".pi", "goal-a"), { recursive: true });
-	writeFileSync(join(root, ".pi", "goal-a", "goal.md"), "# Goal A\n");
+	const taskPath = join(root, ".pi", "control", "goal-a", "T001-work.md");
+	mkdirSync(join(root, ".pi", "control", "goal-a"), { recursive: true });
+	writeFileSync(join(root, ".pi", "control", "goal-a", "goal.md"), "# Goal A\n");
 	writeFileSync(
 		taskPath,
 		`Status: ${status}\nObjective: preserve this\nResult: old\nRemaining: later\n\nOther: content\n`,

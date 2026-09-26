@@ -115,12 +115,21 @@ export function hasPiRootMarker(dir: string): boolean {
 
 /**
  * Walk from `startCwd` toward the filesystem root and return the nearest
- * ancestor containing `.pi/`.
+ * ancestor containing `.pi/`, excluding Control Plane data directories.
  */
 export function findPiRootFromCwd(startCwd: string): string | undefined {
 	let current = canonicalizeAllowMissing(startCwd);
 	for (;;) {
-		if (hasPiRootMarker(current)) return current;
+		if (hasPiRootMarker(current)) {
+			const relativeToRuntime = relative(join(current, PI_ROOT_MARKER), canonicalizeAllowMissing(startCwd));
+			if (relativeToRuntime === "control" || relativeToRuntime.startsWith(`control${sep}`)) {
+				const parent = dirname(current);
+				if (parent === current) return undefined;
+				current = parent;
+				continue;
+			}
+			return current;
+		}
 		const parent = dirname(current);
 		if (parent === current) return undefined;
 		current = parent;
@@ -171,6 +180,7 @@ export function initializePiRoot(root: string): string {
 			throw new PiRootInitializationError(`PiRoot marker is not a directory: ${marker}`);
 		mkdirSync(marker, { recursive: true });
 		mkdirSync(join(marker, "sessions"), { recursive: true });
+		mkdirSync(join(marker, "control"), { recursive: true });
 		try {
 			accessSync(marker, constants.W_OK | constants.X_OK);
 		} catch {
@@ -276,14 +286,14 @@ export function assertManagedControlMutationAllowed(target: string): void {
 	const runtime = getPiRootRuntimeDir(root);
 	if (!runtime) return;
 	const candidate = canonicalizeAllowMissing(target);
-	const inControlRoot = isPathInsidePiRoot(candidate, runtime);
+	const inControlRoot = isPathInsidePiRoot(candidate, getPiRootControlDir(root));
 	if (inControlRoot)
 		throw new PiRootPathError(`Managed Control Plane files must be changed through control tools: ${target}`, target);
 }
 
 export function getPiRootControlDir(root: string | undefined = activePiRoot): string | undefined {
 	if (root === undefined) return undefined;
-	return getPiRootRuntimeDir(root);
+	return join(root, PI_ROOT_MARKER, "control");
 }
 
 export function formatPiRootRelativePath(target: string, root: string | undefined = activePiRoot): string {

@@ -53,8 +53,8 @@ describe("C4 integrated Session-native orchestration", () => {
 		mkdirSync(join(agentDir, "agents"), { recursive: true });
 		mkdirSync(join(root, ".pi"), { recursive: true });
 		mkdirSync(join(root, ".pi", "agents"), { recursive: true });
-		mkdirSync(join(root, ".pi", "goal-a"), { recursive: true });
-		mkdirSync(join(root, ".pi", ma4GoalId), { recursive: true });
+		mkdirSync(join(root, ".pi", "control", "goal-a"), { recursive: true });
+		mkdirSync(join(root, ".pi", "control", ma4GoalId), { recursive: true });
 		writeFileSync(join(root, ".pi", "AGENTS.md"), "PiRoot-local control instructions.\n");
 		writeFileSync(join(root, "AGENTS.md"), "PiRoot instructions.\n");
 		mkdirSync(join(root, ".pi", "agents"), { recursive: true });
@@ -85,14 +85,20 @@ describe("C4 integrated Session-native orchestration", () => {
 			join(root, ".pi", "agents", "debugger-deep.md"),
 			"---\nagentSlug: debugger-deep\ndescription: Diagnose difficult failures.\nvariant: high\n---\nReconstruct failure causes from evidence.\n",
 		);
-		writeFileSync(join(root, ".pi", "goal-a", "goal.md"), "# Goal A\nGoal memory: durable shared context.\n");
-		writeFileSync(join(root, ".pi", "goal-a", "plan.md"), "Plan strategy: complete implementation, then review.\n");
 		writeFileSync(
-			join(root, ".pi", ma4GoalId, "goal.md"),
+			join(root, ".pi", "control", "goal-a", "goal.md"),
+			"# Goal A\nGoal memory: durable shared context.\n",
+		);
+		writeFileSync(
+			join(root, ".pi", "control", "goal-a", "plan.md"),
+			"Plan strategy: complete implementation, then review.\n",
+		);
+		writeFileSync(
+			join(root, ".pi", "control", ma4GoalId, "goal.md"),
 			"# Autonomous fixture\nGoal memory: qualify Controller tool plumbing.\n",
 		);
 		writeFileSync(
-			join(root, ".pi", ma4GoalId, "plan.md"),
+			join(root, ".pi", "control", ma4GoalId, "plan.md"),
 			"Use separate Tasks for implementation, review, remediation, and verification.\n",
 		);
 		const faux = registerFauxProvider({

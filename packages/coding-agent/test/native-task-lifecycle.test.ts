@@ -25,10 +25,10 @@ function fixture(status = "READY"): {
 } {
 	const root = mkdtempSync(join("/tmp", "pi-native-task-lifecycle-"));
 	mkdirSync(join(root, ".pi"), { recursive: true });
-	const taskDir = join(root, ".pi", "goal-a");
+	const taskDir = join(root, ".pi", "control", "goal-a");
 	mkdirSync(taskDir, { recursive: true });
 	const taskPath = join(taskDir, "T001-work.md");
-	writeFileSync(join(root, ".pi", "goal-a", "goal.md"), "# Goal A\n");
+	writeFileSync(join(root, ".pi", "control", "goal-a", "goal.md"), "# Goal A\n");
 	writeFileSync(taskPath, `Status: ${status}\nObjective: test native lifecycle\nResult: old\nRemaining: later\n`);
 	setPiRoot(root);
 	const registry = new SessionRegistry(root);

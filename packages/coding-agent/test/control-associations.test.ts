@@ -21,8 +21,8 @@ import { getDefaultSessionDir } from "../src/core/session-manager.ts";
 
 function fixture(): { root: string; sessionId: string } {
 	const root = mkdtempSync(join("/tmp", "pi-associations-"));
-	mkdirSync(join(root, ".pi"), { recursive: true });
-	const taskDir = join(root, ".pi", "warm-multi-session");
+	mkdirSync(join(root, ".pi", "control"), { recursive: true });
+	const taskDir = join(root, ".pi", "control", "warm-multi-session");
 	mkdirSync(taskDir, { recursive: true });
 	writeFileSync(join(taskDir, "goal.md"), "# Warm\n");
 	writeFileSync(join(taskDir, "T001-work.md"), "Status: READY\n");
@@ -126,7 +126,7 @@ describe("durable task/session associations", () => {
 	it("rejects identity, schema, cardinality, and malformed timestamp errors", () => {
 		const { root, sessionId } = fixture();
 		const assertInvalid = (data: unknown): void => {
-			writeFileSync(join(root, ".pi", "assignments.json"), JSON.stringify(data));
+			writeFileSync(join(root, ".pi", "control", "assignments.json"), JSON.stringify(data));
 			expect(() => readAssociations(root)).toThrow(AssociationError);
 		};
 		assertInvalid({ version: 2, current: [], history: [] });
@@ -177,7 +177,7 @@ describe("durable task/session associations", () => {
 	it("preserves the old file on invalid write and leaves no temp file after replacement", () => {
 		const { root, sessionId } = fixture();
 		writeAssociations(root, valid(sessionId));
-		const path = join(root, ".pi", "assignments.json");
+		const path = join(root, ".pi", "control", "assignments.json");
 		const before = readFileSync(path);
 		expect(() =>
 			writeAssociations(root, {
@@ -198,7 +198,9 @@ describe("durable task/session associations", () => {
 		writeAssociations(root, { version: 1, current: [], history: valid(sessionId).history });
 		expect(JSON.parse(readFileSync(path, "utf8")).current).toEqual([]);
 		expect(
-			readdirSync(join(root, ".pi")).some((name) => name.startsWith(".assignments.json.") && name.endsWith(".tmp")),
+			readdirSync(join(root, ".pi", "control")).some(
+				(name) => name.startsWith(".assignments.json.") && name.endsWith(".tmp"),
+			),
 		).toBe(false);
 		rmSync(root, { recursive: true, force: true });
 	});
@@ -237,7 +239,7 @@ describe("durable task/session associations", () => {
 			join(getDefaultSessionDir(root), "session-b.jsonl"),
 			`${JSON.stringify({ type: "session", version: 3, id: second, timestamp: new Date().toISOString(), cwd: root })}\n`,
 		);
-		writeFileSync(join(root, ".pi", "warm-multi-session", "T002-work.md"), "Status: READY\n");
+		writeFileSync(join(root, ".pi", "control", "warm-multi-session", "T002-work.md"), "Status: READY\n");
 		expect((await assignTaskToSession(root, "warm-multi-session", "T001", sessionId)).changed).toBe(true);
 		await expect(assignTaskToSession(root, "warm-multi-session", "T001", second)).rejects.toThrow(
 			AssociationConflictError,
@@ -255,13 +257,13 @@ describe("durable task/session associations", () => {
 			join(getDefaultSessionDir(root), "session-b.jsonl"),
 			`${JSON.stringify({ type: "session", version: 3, id: second, timestamp: new Date().toISOString(), cwd: root })}\n`,
 		);
-		writeFileSync(join(root, ".pi", "warm-multi-session", "T002-work.md"), "Status: READY\n");
+		writeFileSync(join(root, ".pi", "control", "warm-multi-session", "T002-work.md"), "Status: READY\n");
 		const results = await Promise.all([
 			assignTaskToSession(root, "warm-multi-session", "T001", sessionId),
 			assignTaskToSession(root, "warm-multi-session", "T002", second),
 		]);
 		expect(results.every((result) => result.changed)).toBe(true);
-		writeFileSync(join(root, ".pi", "warm-multi-session", "T003-work.md"), "Status: READY\n");
+		writeFileSync(join(root, ".pi", "control", "warm-multi-session", "T003-work.md"), "Status: READY\n");
 		const third = "session-c";
 		writeFileSync(
 			join(getDefaultSessionDir(root), "session-c.jsonl"),
@@ -269,7 +271,10 @@ describe("durable task/session associations", () => {
 		);
 		setAssociationMutationHooksForTesting({
 			beforeCommit: () => {
-				writeFileSync(join(root, ".pi", "assignments.json"), '{"version":1,"current":[],"history":[]}\n');
+				writeFileSync(
+					join(root, ".pi", "control", "assignments.json"),
+					'{"version":1,"current":[],"history":[]}\n',
+				);
 			},
 		});
 		await expect(assignTaskToSession(root, "warm-multi-session", "T003", third)).rejects.toThrow(
@@ -287,16 +292,16 @@ describe("durable task/session associations", () => {
 		expect(readAssociations(root)).toEqual(before);
 	});
 
-	it("does not create control or depend on the Registry database", () => {
+	it("keeps Control Plane data separate from the Registry database", () => {
 		const root = mkdtempSync(join("/tmp", "pi-associations-no-control-"));
 		mkdirSync(join(root, ".pi"), { recursive: true });
 		setPiRoot(root);
-		const taskDir = join(root, ".pi", "goal-a");
+		const taskDir = join(root, ".pi", "control", "goal-a");
 		mkdirSync(taskDir, { recursive: true });
 		writeFileSync(join(taskDir, "goal.md"), "# Goal A\n");
 		writeFileSync(join(taskDir, "T001-work.md"), "Status: READY\n");
 		expect(readAssociations(root).current).toEqual([]);
-		expect(existsSync(join(root, ".pi", "control.sqlite3"))).toBe(false);
+		expect(existsSync(join(root, ".pi", "control", "control.sqlite3"))).toBe(false);
 		rmSync(root, { recursive: true, force: true });
 	});
 });

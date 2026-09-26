@@ -3,7 +3,7 @@ Work area
 implementation, testing
 
 Objective
-Implement Pi-native optional Agent profiles and Controller-directed fresh Session execution tenures per ADR-0002 and `design/architecture/agent-scheduling-phase1.md`: formal `.pi/<goal-id>` Markdown authority; project-over-global profile resolution; prompt/model/variant composition; `forkExecutionSession({task, agentSlug?, cwd?})`; `dispatch_task(task, agent?, cwd?)`; registry and `/sessions` metadata; Task memory refresh across sequential tenures. Preserve Task SSOT, existing assignment generation, ordinary AgentSession/SessionPool/SessionRegistry, standalone compatibility, and frozen exclusions.
+Implement Pi-native optional Agent profiles and Controller-directed fresh Session execution tenures per ADR-0002 and `design/architecture/agent-scheduling-phase1.md`: formal `.pi/control/<goal-id>` Markdown authority; project-over-global profile resolution; prompt/model/variant composition; `forkExecutionSession({task, agentSlug?, cwd?})`; `dispatch_task(task, agent?, cwd?)`; registry and `/sessions` metadata; Task memory refresh across sequential tenures. Preserve Task SSOT, existing assignment generation, ordinary AgentSession/SessionPool/SessionRegistry, standalone compatibility, and frozen exclusions.
 
 Inputs
 - `design/decisions/ADR-0002-pi-native-control-authority.md`

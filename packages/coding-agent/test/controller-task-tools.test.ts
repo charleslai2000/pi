@@ -94,7 +94,7 @@ async function setup(): Promise<{
 	mkdirSync(join(root, ".pi", "agents"), { recursive: true });
 	writeFileSync(join(root, ".pi", "agents", "coder.md"), "Coding profile prompt.\n");
 	writeFileSync(join(root, ".pi", "agents", "reviewer.md"), "Review profile prompt.\n");
-	const taskDir = join(root, ".pi", "goal-a");
+	const taskDir = join(root, ".pi", "control", "goal-a");
 	mkdirSync(taskDir, { recursive: true });
 	writeFileSync(join(taskDir, "goal.md"), "# Goal A\n");
 	setPiRoot(root);
@@ -217,7 +217,7 @@ describe("Controller Task/Executor tools", () => {
 		await call(value.controllerSession, "update_goal_memory", { goalId: "goal-a", memory: "Cross-Task invariant" });
 		await call(value.controllerSession, "update_plan_memory", { goalId: "goal-a", memory: "T001 before T002" });
 		expect(readGoal(value.root, "goal-a").content).toContain("Memory: Cross-Task invariant");
-		expect(readFileSync(join(value.root, ".pi", "goal-a", "plan.md"), "utf8")).toContain(
+		expect(readFileSync(join(value.root, ".pi", "control", "goal-a", "plan.md"), "utf8")).toContain(
 			"Coordination memory: T001 before T002",
 		);
 		const catalog = JSON.parse(toolText(await call(value.controllerSession, "list_agents", {}))) as Array<{
@@ -280,8 +280,8 @@ describe("Controller Task/Executor tools", () => {
 		const gate = executor.agent.state.tools.find((tool) => tool.name === "task_gate")!;
 		await gate.execute("test", { decision: "accept" });
 		writeFileSync(
-			join(value.root, ".pi", "goal-a", "T001-native.md"),
-			readFileSync(join(value.root, ".pi", "goal-a", "T001-native.md"), "utf8").replace(
+			join(value.root, ".pi", "control", "goal-a", "T001-native.md"),
+			readFileSync(join(value.root, ".pi", "control", "goal-a", "T001-native.md"), "utf8").replace(
 				"Remaining:",
 				`Remaining: one\nRemaining: two`,
 			),

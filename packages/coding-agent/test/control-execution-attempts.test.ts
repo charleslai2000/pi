@@ -18,9 +18,9 @@ import { getDefaultSessionDir } from "../src/core/session-manager.ts";
 
 function fixture(): { root: string; sessionId: string; taskPath: string } {
 	const root = mkdtempSync(join("/tmp", "pi-attempts-"));
-	const taskDir = join(root, "control", "goal-a", "tasks");
+	const taskDir = join(root, ".pi", "control", "goal-a");
 	mkdirSync(taskDir, { recursive: true });
-	writeFileSync(join(root, "control", "goal-a", "goal.md"), "# Goal A\n");
+	writeFileSync(join(root, ".pi", "control", "goal-a", "goal.md"), "# Goal A\n");
 	const taskPath = join(taskDir, "T001-work.md");
 	writeFileSync(taskPath, "Status: ACTIVE\nObjective: do work\n");
 	setPiRoot(root);
@@ -97,7 +97,7 @@ describe("durable execution attempts", () => {
 		await expect(recordAttemptTerminal(value.root, { attemptId: "missing", type: "aborted" })).rejects.toThrow(
 			ExecutionAttemptError,
 		);
-		const path = join(value.root, "control", "execution-attempts.jsonl");
+		const path = join(value.root, ".pi", "control", "execution-attempts.jsonl");
 		const start = {
 			version: 1,
 			type: "started",
@@ -127,7 +127,7 @@ describe("durable execution attempts", () => {
 			taskId: "T001",
 			sessionId: value.sessionId,
 		});
-		const path = join(value.root, "control", "execution-attempts.jsonl");
+		const path = join(value.root, ".pi", "control", "execution-attempts.jsonl");
 		const valid = readFileSync(path, "utf8");
 		writeFileSync(path, `${valid}{"version":1,"type":"started"`);
 		expect(readExecutionAttempts(value.root).attempts).toHaveLength(1);
@@ -153,13 +153,13 @@ describe("durable execution attempts", () => {
 		expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
 		expect(results.filter((result) => result.status === "rejected")).toHaveLength(1);
 		expect(readExecutionAttempts(value.root).attempts).toHaveLength(1);
-		rmSync(join(value.root, "control", "state"), { recursive: true, force: true });
+		rmSync(join(value.root, ".pi", "state"), { recursive: true, force: true });
 		expect(readExecutionAttempts(value.root).attempts).toHaveLength(1);
 	});
 
 	it("allocates V2 sequence numbers and preserves legacy UUID history", async () => {
 		const value = fixture();
-		const path = join(value.root, "control", "execution-attempts.jsonl");
+		const path = join(value.root, ".pi", "control", "execution-attempts.jsonl");
 		writeFileSync(
 			path,
 			`${JSON.stringify({ version: 1, type: "started", attemptId: "legacy", goalId: "goal-a", taskId: "T001", sessionId: value.sessionId, at: "2026-01-01T00:00:00Z", taskContentSha256: "0".repeat(64) })}\n${JSON.stringify({ version: 1, type: "aborted", attemptId: "legacy", goalId: "goal-a", taskId: "T001", sessionId: value.sessionId, at: "2026-01-01T00:01:00Z" })}\n`,

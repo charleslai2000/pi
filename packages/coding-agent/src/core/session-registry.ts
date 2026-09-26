@@ -1,11 +1,11 @@
 import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { hostname } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { canonicalizePath } from "../utils/paths.ts";
 import { readAssociations } from "./control/associations.ts";
-import { getPiRootRuntimeDir, hasPiRootMarker } from "./pi-root.ts";
+import { getPiRootControlDir, getPiRootRuntimeDir, hasPiRootMarker } from "./pi-root.ts";
 import { type SessionInfo, SessionManager } from "./session-manager.ts";
 
 export type SessionRegistryRole = "controller" | "executor" | "unassigned";
@@ -53,19 +53,30 @@ function now(): number {
 	return Date.now();
 }
 function registryPath(runtimeDir: string): string {
-	return join(runtimeDir, "control.sqlite3");
+	const controlDir = getPiRootControlDir(dirname(runtimeDir));
+	if (!controlDir) throw new Error(`PiRoot has no Control Plane directory: ${runtimeDir}`);
+	return join(controlDir, "control.sqlite3");
 }
 function ensurePiRuntime(runtimeDir: string): void {
 	mkdirSync(runtimeDir, { recursive: true });
+	const controlDir = getPiRootControlDir(dirname(runtimeDir));
+	if (!controlDir) throw new Error(`PiRoot has no Control Plane directory: ${runtimeDir}`);
+	mkdirSync(controlDir, { recursive: true });
 	const oldPath = join(runtimeDir, "state", "control.sqlite3");
+	const previousPath = join(runtimeDir, "control.sqlite3");
 	const newPath = registryPath(runtimeDir);
+	if (!existsSync(newPath) && existsSync(previousPath)) {
+		if (existsSync(`${previousPath}-wal`) || existsSync(`${previousPath}-shm`))
+			throw new Error(`Legacy SessionRegistry has live SQLite sidecars under ${runtimeDir}`);
+		renameSync(previousPath, newPath);
+	}
 	if (!existsSync(newPath) && existsSync(oldPath)) {
 		if (existsSync(`${oldPath}-wal`) || existsSync(`${oldPath}-shm`))
 			throw new Error(`Legacy SessionRegistry has live SQLite sidecars under ${runtimeDir}`);
 		renameSync(oldPath, newPath);
 	}
 	const ignorePath = join(runtimeDir, ".gitignore");
-	const required = "control.sqlite3\ncontrol.sqlite3-*\n";
+	const required = "control/control.sqlite3\ncontrol/control.sqlite3-*\n";
 	if (!existsSync(ignorePath)) {
 		writeFileSync(ignorePath, required);
 		return;
@@ -167,7 +178,7 @@ CREATE TABLE IF NOT EXISTS sessions (
 		try {
 			const canonicalId = this.canonicalControlSessionId();
 			const rawAssociations = JSON.parse(
-				readFileSync(join(getPiRootRuntimeDir(this.root)!, "assignments.json"), "utf8"),
+				readFileSync(join(getPiRootControlDir(this.root)!, "assignments.json"), "utf8"),
 			) as {
 				current?: Array<{ sessionId: string }>;
 			};

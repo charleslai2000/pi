@@ -3,10 +3,10 @@
 Status: DONE
 
 ## Authorized outcome
-Formalize durable control documents exclusively under `<PiRoot>/.pi/<goal-id>/`, provide Controller-only Goal/Plan durable-memory mutations, and compose execution contexts solely from canonical Markdown readers while preserving Task lifecycle SSOT and ordinary Session transcript storage.
+Formalize durable control documents exclusively under `<PiRoot>/.pi/control/<goal-id>/`, provide Controller-only Goal/Plan durable-memory mutations, and compose execution contexts solely from canonical Markdown readers while preserving Task lifecycle SSOT and ordinary Session transcript storage.
 
 ## Scope
-- Deterministically migrate any legacy `control/<goal-id>/` documents to `.pi/<goal-id>/` without dual authority.
+- Deterministically migrate any legacy `control/<goal-id>/` documents to `.pi/control/<goal-id>/` without dual authority.
 - Add managed Goal/Plan memory mutation primitives for Controller; preserve Task-scoped Executor memory.
 - Restrict raw file tools from managed Goal/Plan/Task Markdown.
 - Tighten `.pi/.gitignore` to keep runtime-local DB/locks/cache out of Git while permitting authority/profile/policy files.

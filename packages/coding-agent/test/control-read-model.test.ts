@@ -21,7 +21,7 @@ describe("control read model", () => {
 	it("rejects malformed, duplicate, missing, and escaping paths", () => {
 		const base = mkdtempSync(join("/tmp", "pi-control-read-"));
 		const root = join(base, "project");
-		const authority = join(root, ".pi");
+		const authority = join(root, ".pi", "control");
 		mkdirSync(join(authority, "g"), { recursive: true });
 		writeFileSync(join(authority, "g", "goal.md"), "# G\n");
 		mkdirSync(join(authority, "h"), { recursive: true });
@@ -45,9 +45,10 @@ describe("control read model", () => {
 	it("returns an empty projection when an available Task authority has no Goals", () => {
 		const base = mkdtempSync(join("/tmp", "pi-control-empty-"));
 		const root = join(base, "project");
-		mkdirSync(join(root, ".pi"), { recursive: true });
+		mkdirSync(join(root, ".pi", "control"), { recursive: true });
 		writeFileSync(join(root, ".pi", "AGENTS.md"), "instructions\n");
-		writeFileSync(join(root, ".pi", "frontier.md"), "# Frontier\n");
+		mkdirSync(join(root, ".pi", "control"), { recursive: true });
+		writeFileSync(join(root, ".pi", "control", "frontier.md"), "# Frontier\n");
 		setPiRoot(root);
 		expect(listGoals(root)).toEqual([]);
 		expect(() => readGoal(root, "missing-goal")).toThrow(ControlReadError);

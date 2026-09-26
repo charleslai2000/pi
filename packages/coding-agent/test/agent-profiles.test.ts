@@ -129,7 +129,7 @@ describe("Pi Agent profiles", () => {
 			join(root, ".pi", "agents", "coder.md"),
 			"---\nagentSlug: coder\nmodel: faux/model\nvariant: high\n---\nProfile body.\n",
 		);
-		const goal = join(root, ".pi", "T001");
+		const goal = join(root, ".pi", "control", "T001");
 		mkdirSync(goal, { recursive: true });
 		writeFileSync(join(goal, "goal.md"), "# Goal T001\nStatus: READY\nMemory: Goal durable memory.\n");
 		writeFileSync(join(goal, "plan.md"), "Plan current strategy and coordination memory.\n");
@@ -201,7 +201,7 @@ describe("Pi Agent profiles", () => {
 
 	it("applies model-only and variant-only overrides through Session creation, preserving omitted defaults", async () => {
 		const root = workspace();
-		const taskDir = join(root, ".pi", "goal");
+		const taskDir = join(root, ".pi", "control", "goal");
 		mkdirSync(taskDir, { recursive: true });
 		writeFileSync(join(taskDir, "goal.md"), "# Goal\nStatus: READY\n");
 		writeFileSync(join(taskDir, "T001-work.md"), "Status: READY\nObjective: do it\nCompletion: done\n");
@@ -284,7 +284,7 @@ describe("Pi Agent profiles", () => {
 
 	it("assembles only Goal, Plan, declared prerequisite, and current Task context", () => {
 		const root = workspace();
-		const goalDir = join(root, ".pi", "goal-a");
+		const goalDir = join(root, ".pi", "control", "goal-a");
 		mkdirSync(goalDir, { recursive: true });
 		writeFileSync(join(goalDir, "goal.md"), "# Goal A\nStatus: READY\nMemory: Goal memory: keep shared invariant.\n");
 		writeFileSync(

@@ -31,7 +31,7 @@ function makeProject(): { base: string; root: string; agentDir: string } {
 }
 
 function db(root: string): DatabaseSync {
-	return new DatabaseSync(join(root, ".pi", "control.sqlite3"));
+	return new DatabaseSync(join(root, ".pi", "control", "control.sqlite3"));
 }
 
 function persistedSession(root: string, cwdName: string): string {
@@ -245,7 +245,7 @@ describe("PiRoot application cross-process lifecycle", () => {
 		const first = await start(project);
 		const original = { id: first.ready.canonicalSessionId, file: first.ready.sessionFile };
 		const database = db(project.root);
-		const controlDir = join(project.root, ".pi");
+		const controlDir = join(project.root, ".pi", "control");
 		database.close();
 		expect(await commandAndExit(first.child, "shutdown")).toBe(0);
 		for (const suffix of ["", "-wal", "-shm"]) rmSync(join(controlDir, `control.sqlite3${suffix}`), { force: true });

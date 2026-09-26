@@ -58,13 +58,13 @@ describe("SessionRegistry recovery integration", () => {
 		const control = durable(value.root, join(value.root, ".pi", "sessions"), "legacy-controller");
 		const executor = durable(value.design, value.sessions, "legacy-executor");
 		const ordinary = durable(value.experiments, value.sessions, "legacy-ordinary");
-		mkdirSync(join(value.root, ".pi", "qualification"), { recursive: true });
-		writeFileSync(join(value.root, ".pi", "qualification", "goal.md"), "# Qualification\n");
+		mkdirSync(join(value.root, ".pi", "control", "qualification"), { recursive: true });
+		writeFileSync(join(value.root, ".pi", "control", "qualification", "goal.md"), "# Qualification\n");
 		writeFileSync(
-			join(value.root, ".pi", "qualification", "T001-fixture.md"),
+			join(value.root, ".pi", "control", "qualification", "T001-fixture.md"),
 			"Status: ACTIVE\nWork area\nfixture\nObjective\nfixture\nCompletion\nfixture\nResult\nfixture\nRemaining\nfixture\n",
 		);
-		const dbPath = join(value.root, ".pi", "control.sqlite3");
+		const dbPath = join(value.root, ".pi", "control", "control.sqlite3");
 		const formalSessions = join(value.root, ".pi", "sessions");
 		mkdirSync(formalSessions, { recursive: true });
 		for (const manager of [control, executor, ordinary])
@@ -120,8 +120,9 @@ INSERT INTO meta VALUES('pi_root','${value.root}');`);
 			)
 			.run({ id: "instance-preserved", pid: 777, host: "host", started: 41, heartbeat: 42 });
 		legacy.close();
+		mkdirSync(join(value.root, ".pi", "control"), { recursive: true });
 		writeFileSync(
-			join(value.root, ".pi", "assignments.json"),
+			join(value.root, ".pi", "control", "assignments.json"),
 			JSON.stringify(
 				{
 					version: 1,
@@ -197,8 +198,8 @@ INSERT INTO meta VALUES('pi_root','${value.root}');`);
 		const executor = durable(value.design, value.sessions, "conflict");
 		mkdirSync(join(value.root, ".pi", "sessions"), { recursive: true });
 		copyFileSync(executor.getSessionFile()!, join(value.root, ".pi", "sessions", "conflict.jsonl"));
-		const dbPath = join(value.root, ".pi", "control.sqlite3");
-		mkdirSync(join(value.root, ".pi"), { recursive: true });
+		const dbPath = join(value.root, ".pi", "control", "control.sqlite3");
+		mkdirSync(join(value.root, ".pi", "control"), { recursive: true });
 		const legacy = new DatabaseSync(dbPath);
 		legacy.exec(`CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE runtime_instances (instance_id TEXT PRIMARY KEY, pid INTEGER NOT NULL, hostname TEXT NOT NULL, started_at INTEGER NOT NULL, heartbeat_at INTEGER NOT NULL, state TEXT NOT NULL CHECK(state IN ('active','closed')));
@@ -221,8 +222,11 @@ INSERT INTO meta VALUES('pi_root','${value.root}');`);
 		});
 		legacy.prepare("UPDATE meta SET value=? WHERE key='canonical_control_session_id'").run(executor.getSessionId());
 		legacy.prepare("INSERT INTO meta VALUES('dummy','value')");
+		mkdirSync(join(value.root, ".pi", "control", "qualification"), { recursive: true });
+		writeFileSync(join(value.root, ".pi", "control", "qualification", "goal.md"), "# Qualification\n");
+		writeFileSync(join(value.root, ".pi", "control", "qualification", "T001-work.md"), "Status: ACTIVE\n");
 		writeFileSync(
-			join(value.root, ".pi", "assignments.json"),
+			join(value.root, ".pi", "control", "assignments.json"),
 			JSON.stringify(
 				{
 					version: 1,
@@ -250,10 +254,10 @@ INSERT INTO meta VALUES('pi_root','${value.root}');`);
 			),
 		);
 		legacy.close();
-		mkdirSync(join(value.root, ".pi", "qualification"), { recursive: true });
-		writeFileSync(join(value.root, ".pi", "qualification", "goal.md"), "# Qualification\n");
+		mkdirSync(join(value.root, ".pi", "control", "qualification"), { recursive: true });
+		writeFileSync(join(value.root, ".pi", "control", "qualification", "goal.md"), "# Qualification\n");
 		writeFileSync(
-			join(value.root, ".pi", "qualification", "T001-fixture.md"),
+			join(value.root, ".pi", "control", "qualification", "T001-fixture.md"),
 			"Status: ACTIVE\nWork area\nfixture\nObjective\nfixture\nCompletion\nfixture\nResult\nfixture\nRemaining\nfixture\n",
 		);
 		const before = new DatabaseSync(dbPath, { readOnly: true });
@@ -347,7 +351,7 @@ INSERT INTO meta VALUES('pi_root','${value.root}');`);
 			name: design.getSessionName(),
 		});
 		const oldId = first.runtimeInstance().instance_id;
-		const database = new DatabaseSync(join(value.root, ".pi", "control.sqlite3"));
+		const database = new DatabaseSync(join(value.root, ".pi", "control", "control.sqlite3"));
 		database.prepare("UPDATE runtime_instances SET heartbeat_at=0 WHERE instance_id=?").run(oldId);
 		database.close();
 		const second = new SessionRegistry(value.root, { heartbeatIntervalMs: 100, staleAfterMs: 1 });
@@ -379,7 +383,8 @@ INSERT INTO meta VALUES('pi_root','${value.root}');`);
 		first.setCanonicalControlSessionId(control.getSessionId());
 		first.close();
 		const databaseDir = join(value.root, ".pi");
-		for (const suffix of ["", "-wal", "-shm"]) rmSync(join(databaseDir, `control.sqlite3${suffix}`), { force: true });
+		for (const suffix of ["", "-wal", "-shm"])
+			rmSync(join(databaseDir, "control", `control.sqlite3${suffix}`), { force: true });
 		const rebuilt = new SessionRegistry(value.root);
 		rebuilt.rebuild(await SessionManager.listAll(value.sessions));
 		rebuilt.setCanonicalControlSessionId(control.getSessionId());

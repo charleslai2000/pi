@@ -74,7 +74,7 @@ describe("PiRoot resolution", () => {
 		setPiRoot(undefined);
 	});
 
-	it("resolves to the nearest ancestor containing .pi/ without requiring control/", () => {
+	it("resolves to the nearest ancestor containing .pi/", () => {
 		const root = makePiRoot(base, "project");
 		const nested = makeDir(root, "design", "sub");
 		expect(resolvePiRoot({ cwd: nested })).toBe(root);
@@ -85,7 +85,8 @@ describe("PiRoot resolution", () => {
 		expect(resolvePiRootInfo({ explicitRoot: root, cwd: base })).toEqual({ root });
 		expect(initializePiRoot(root)).toBe(root);
 		expect(initializePiRoot(root)).toBe(root);
-		for (const path of [join(root, ".pi"), join(root, ".pi", "sessions")]) expect(existsSync(path)).toBe(true);
+		for (const path of [join(root, ".pi"), join(root, ".pi", "sessions"), join(root, ".pi", "control")])
+			expect(existsSync(path)).toBe(true);
 		expect(existsSync(join(root, "control"))).toBe(false);
 	});
 

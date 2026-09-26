@@ -1,6 +1,6 @@
-import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { basename, dirname, join, relative, resolve } from "node:path";
-import { getPiRoot, getPiRootRuntimeDir, isPathInsidePiRoot } from "../pi-root.ts";
+import { getPiRoot, getPiRootControlDir, getPiRootRuntimeDir, isPathInsidePiRoot } from "../pi-root.ts";
 
 export interface GoalRecord {
 	readonly goalId: string;
@@ -56,12 +56,19 @@ function canonical(path: string): string {
 
 function controlDirectory(piRoot: string): string {
 	const root = canonical(piRoot);
-	const resolved = getPiRootRuntimeDir(root);
-	if (!resolved || !existsSync(resolved))
+	const runtimeDir = getPiRootRuntimeDir(root);
+	const resolved = getPiRootControlDir(root);
+	if (!runtimeDir || !resolved || !existsSync(runtimeDir))
 		throw new ControlReadError(`PiRoot authority directory is unavailable: ${root}`);
-	if (!statSync(resolved).isDirectory())
+	if (!statSync(runtimeDir).isDirectory())
 		throw new ControlReadError(`PiRoot authority directory is not a directory: ${root}`);
-	return canonical(resolved);
+	if (!existsSync(resolved)) mkdirSync(resolved, { recursive: true });
+	if (!statSync(resolved).isDirectory())
+		throw new ControlReadError(`PiRoot control directory is not a directory: ${resolved}`);
+	const control = canonical(resolved);
+	if (!isPathInsidePiRoot(control, runtimeDir))
+		throw new ControlReadError(`PiRoot control directory escapes the .pi runtime root: ${resolved}`);
+	return control;
 }
 
 function assertControlPath(path: string, controlDir: string): string {

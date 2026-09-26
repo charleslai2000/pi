@@ -1,6 +1,6 @@
 import { existsSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { getPiRoot, getPiRootRuntimeDir } from "../pi-root.ts";
+import { getPiRoot, getPiRootControlDir } from "../pi-root.ts";
 import { SessionManager } from "../session-manager.ts";
 import { getSessionRegistry } from "../session-registry.ts";
 import { readGoal, readTask } from "./read-model.ts";
@@ -98,9 +98,9 @@ function enqueueMutation<T>(path: string, operation: () => T | Promise<T>): Prom
 
 function associationPath(piRoot: string): string {
 	try {
-		const runtimeDir = getPiRootRuntimeDir(piRoot);
-		if (!runtimeDir) throw new Error("PiRoot has no formal runtime directory");
-		return join(runtimeDir, "assignments.json");
+		const controlDir = getPiRootControlDir(piRoot);
+		if (!controlDir) throw new Error("PiRoot has no Control Plane directory");
+		return join(controlDir, "assignments.json");
 	} catch (error) {
 		throw new AssociationError(`Invalid control directory: ${String(error)}`);
 	}

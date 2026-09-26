@@ -1,4 +1,4 @@
-# Machine-local PiRoot runtime state; authority documents remain trackable.
+# Machine-local PiRoot runtime state; Control Plane authority remains trackable.
 /state/
 /git/
 /npm/
@@ -13,3 +13,8 @@
 *.tmp.*
 /cache/
 /cache-*/
+control.sqlite3
+control.sqlite3-*
+/control/assignments.json
+/control/execution-attempts.jsonl
+/control/frontier.md

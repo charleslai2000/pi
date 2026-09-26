@@ -1,5 +1,6 @@
-import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { afterEach, describe, expect, it } from "vitest";
 import { resolvePiRootInfo, setPiRoot } from "../src/core/pi-root.ts";
 import { SessionRegistry } from "../src/core/session-registry.ts";
@@ -63,10 +64,10 @@ describe("SessionRegistry control plane", () => {
 		registry.rebuild(rows);
 		const first = logicalRows(registry);
 		for (const file of ["control.sqlite3", "control.sqlite3-wal", "control.sqlite3-shm"]) {
-			rmSync(join(root, ".pi", file), { force: true });
+			rmSync(join(root, ".pi", "control", file), { force: true });
 		}
 		registry.close();
-		expect(existsSync(join(root, ".pi", "control.sqlite3"))).toBe(false);
+		expect(existsSync(join(root, ".pi", "control", "control.sqlite3"))).toBe(false);
 		const rebuilt = new SessionRegistry(root);
 		rebuilt.rebuild(rows);
 		expect(logicalRows(rebuilt)).toEqual(first);
@@ -105,7 +106,7 @@ describe("SessionRegistry control plane", () => {
 		rmSync(base, { recursive: true, force: true });
 	});
 
-	it("allows a PiRoot with .pi/ and no control/ directory", () => {
+	it("allows a PiRoot with .pi/ and no Control Plane directory", () => {
 		const base = mkdtempSync(join("/tmp", "pi-registry-no-control-"));
 		const root = join(base, "project");
 		mkdirSync(join(root, ".pi"), { recursive: true });
@@ -116,12 +117,69 @@ describe("SessionRegistry control plane", () => {
 		rmSync(base, { recursive: true, force: true });
 	});
 
-	it("does not treat control/ as a PiRoot marker", () => {
+	it("does not treat .pi/control/ as a PiRoot marker", () => {
 		const base = mkdtempSync(join("/tmp", "pi-registry-no-marker-"));
 		const root = join(base, "project");
-		const control = join(root, "control");
+		const control = join(root, ".pi", "control");
 		mkdirSync(control, { recursive: true });
 		expect(() => resolvePiRootInfo({ cwd: control })).toThrow();
+		rmSync(base, { recursive: true, force: true });
+	});
+
+	it("migrates legacy registry rows when stale assignments reference a missing goal", () => {
+		const base = mkdtempSync(join("/tmp", "pi-registry-stale-assignment-"));
+		const root = join(base, "project");
+		const runtimeDir = join(root, ".pi");
+		mkdirSync(join(runtimeDir, "control"), { recursive: true });
+		setPiRoot(root);
+
+		const db = new DatabaseSync(join(runtimeDir, "control", "control.sqlite3"));
+		db.exec(`
+CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+CREATE TABLE runtime_instances (
+	instance_id TEXT PRIMARY KEY, pid INTEGER NOT NULL, hostname TEXT NOT NULL,
+	started_at INTEGER NOT NULL, heartbeat_at INTEGER NOT NULL,
+	state TEXT NOT NULL CHECK(state IN ('active','closed'))
+);
+CREATE TABLE sessions (
+	session_id TEXT PRIMARY KEY, session_file TEXT UNIQUE, cwd TEXT NOT NULL, name TEXT,
+	role TEXT NOT NULL CHECK(role IN ('control','unassigned')),
+	runtime_state TEXT NOT NULL CHECK(runtime_state IN ('active','inactive')),
+	runtime_instance_id TEXT REFERENCES runtime_instances(instance_id),
+	last_seen_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+);
+INSERT INTO sessions VALUES('executor-session',NULL,'/tmp/project',NULL,'unassigned','inactive',NULL,1,1);
+`);
+		db.close();
+		mkdirSync(join(runtimeDir, "control"), { recursive: true });
+		mkdirSync(join(runtimeDir, "control", "goal-a"), { recursive: true });
+		writeFileSync(join(runtimeDir, "control", "goal-a", "goal.md"), "# Goal A\n");
+		writeFileSync(join(runtimeDir, "control", "goal-a", "T001-work.md"), "Status: READY\n");
+		writeFileSync(
+			join(runtimeDir, "control", "assignments.json"),
+			JSON.stringify({
+				version: 1,
+				current: [
+					{
+						goalId: "deleted-goal",
+						taskId: "T001",
+						sessionId: "executor-session",
+						assignedAt: new Date(1).toISOString(),
+						generation: 1,
+					},
+				],
+				history: [],
+			}),
+		);
+
+		const registry = new SessionRegistry(root);
+		expect(registry.getRoot()).toBe(root);
+		const migrated = new DatabaseSync(join(runtimeDir, "control", "control.sqlite3"));
+		expect(migrated.prepare("SELECT role FROM sessions WHERE session_id=?").get("executor-session")).toEqual({
+			role: "executor",
+		});
+		migrated.close();
+		registry.close();
 		rmSync(base, { recursive: true, force: true });
 	});
 

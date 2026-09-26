@@ -2,8 +2,8 @@
 
 ## Established results
 - Checkpoint `e0e9098ee` records MA1/MA2. MA3-only paths have been staged and verified; next commit and push the checkpoint to `origin/main`.
-- Nineteen Goal directories, 19 Plans, and 19 flattened Task documents migrated from legacy `control/<goal>/tasks/TNNN-*.md` to `.pi/<goal>/TNNN-*.md`. Migration preserved Goal/Task IDs and moved original Markdown without rewriting status, result, memory, or dependency data. No destination conflicts existed. A migration helper was tested but not wired into runtime.
-- Canonical read model resolves `.pi/<goal-id>` only. Execution context is Goal → Plan → declared prerequisites → full current Task; tests assert ordering and unrelated sibling exclusion.
+- Historical migration moved Goal/Plan/Task authority from legacy `control/<goal>/tasks/TNNN-*.md` into `.pi/control/<goal>/`. This repository-local migration now records the current canonical path; the historical result is retained as recorded evidence.
+- Canonical read model resolves `.pi/control/<goal-id>` only. Execution context is Goal → Plan → declared prerequisites → full current Task; tests assert ordering and unrelated sibling exclusion.
 - Controller-only `update_goal_memory` and `update_plan_memory` tools call managed Markdown primitives. Executor admission exposes Task lifecycle/memory only; tests assert Goal/Plan mutation tools are absent from executor tools.
 - Raw write/edit reject paths under managed Goal directories. `.pi/.gitignore` excludes local state/git/npm/session, DB, locks, temp, and cache files while authority/policy/profile Markdown remains trackable.
 - Session transcripts remain in the user-level default `~/.pi/agent/sessions/<PiRoot-key>` namespace; project `.pi/sessions` is ignored.

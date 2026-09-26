@@ -91,7 +91,7 @@ describe("PiRoot application startup", () => {
 			result: "preserved result",
 			memory: "preserved Task memory",
 		});
-		expect(readFileSync(join(root, ".pi", "legacy-goal", "plan.md"), "utf8")).toContain(
+		expect(readFileSync(join(root, ".pi", "control", "legacy-goal", "plan.md"), "utf8")).toContain(
 			"Coordination memory: preserve strategy",
 		);
 		expect(application.foregroundSessionId).toBe(application.canonicalControlSessionId);

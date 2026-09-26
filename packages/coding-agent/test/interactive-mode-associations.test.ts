@@ -11,9 +11,9 @@ import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
 
 function makeFixture(): { root: string; sessionDir: string; d1: string; d2: string; control: string } {
 	const root = mkdtempSync(join("/tmp", "pi-interactive-associations-"));
-	const control = join(root, ".pi");
+	const control = join(root, ".pi", "control");
 	const taskDir = join(control, "goal-a");
-	mkdirSync(join(root, ".pi"), { recursive: true });
+	mkdirSync(control, { recursive: true });
 	mkdirSync(taskDir, { recursive: true });
 	writeFileSync(join(control, "goal-a", "goal.md"), "# Goal A\n");
 	writeFileSync(join(taskDir, "T001-work.md"), "Status: READY\n");
@@ -134,7 +134,7 @@ describe("InteractiveMode association commands", () => {
 		for (const input of [
 			"/assign ../T001",
 			"/assign /goal-a/T001",
-			"/assign .pi/goal-a/T001.md",
+			"/assign .pi/control/goal-a/T001.md",
 			"/assign goal-a/T001/extra",
 			"/assign missing/T001",
 			"/assign goal-a/T999",

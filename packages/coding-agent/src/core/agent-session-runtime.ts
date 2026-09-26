@@ -500,7 +500,7 @@ export class AgentSessionRuntime {
 		this.controllerTool(
 			_session,
 			"create_goal",
-			"Create a Goal authority directory under .pi/<goal-id>/ with goal.md, plan.md, and optional cross-Task Memory.",
+			"Create a Goal authority directory under .pi/control/<goal-id>/ with goal.md, plan.md, and optional cross-Task Memory.",
 			{
 				type: "object",
 				properties: {
@@ -561,7 +561,7 @@ export class AgentSessionRuntime {
 		this.controllerTool(
 			_session,
 			"update_plan_memory",
-			"Update only the current Coordination memory field in .pi/<goal-id>/plan.md; Task DAG and cross-Task strategy remain Plan authority.",
+			"Update only the current Coordination memory field in .pi/control/<goal-id>/plan.md; Task DAG and cross-Task strategy remain Plan authority.",
 			{
 				type: "object",
 				properties: { goalId: { type: "string" }, memory: { type: "string" } },
